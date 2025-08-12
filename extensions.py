@@ -1,0 +1,24 @@
+from supabase import create_client
+from config import Config
+import anthropic
+from groq import Groq
+from langchain_openai import OpenAIEmbeddings
+from pinecone import Pinecone
+
+def init_supabase(app):
+    app.supabase = create_client(Config.SUPABASE_URL, Config.SUPABASE_KEY)
+
+def init_groq(app):
+    app.groq = Groq(api_key=Config.GROQ_API_KEY)
+def init_anthropic(app):
+    app.anthropic = anthropic.Anthropic(api_key=Config.CLAUDE_API_KEY)
+
+def init_openai_embeddings(app):
+    app.embeddings = OpenAIEmbeddings(
+        model="text-embedding-3-large",
+        openai_api_key=Config.OPENAI_API_KEY,
+    )
+
+def init_pinecone(app):
+    pc = Pinecone(api_key=Config.PINECONE_API_KEY)
+    app.pinecone_index = pc.Index(Config.MEETING_TRANSCRIPTS_INDEX)

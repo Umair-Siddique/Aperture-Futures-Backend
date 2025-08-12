@@ -1,0 +1,5 @@
+.env
+testing_audios/
+.venv/
+__pycache__/
+transcript.txt
