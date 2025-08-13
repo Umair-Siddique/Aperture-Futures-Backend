@@ -199,3 +199,189 @@ def get_conversation(user, conversation_id):
     except Exception as e:
         current_app.logger.error(f"Error getting conversation: {e}")
         return jsonify({"error": "Failed to get conversation"}), 500
+    
+
+
+
+
+# --- CREATE MESSAGE ENDPOINT ---
+
+
+# ... existing code ...
+
+# ... existing code ...
+
+# --- CREATE MESSAGE ENDPOINT ---
+@conversations_bp.route("/<conversation_id>/messages", methods=["POST"])
+@token_required
+def create_message(user, conversation_id):
+    """
+    Create a new message in a specific conversation.
+    Request body:
+      {
+        "role": "user" | "assistant" | "system",
+        "content": "message content"
+      }
+    """
+    data = request.get_json()
+    
+    if not data:
+        return jsonify({"error": "Request body is required"}), 400
+    
+    role = data.get("role")
+    content = data.get("content")
+    
+    # Validate role
+    if not role or role not in ["user", "assistant", "system"]:
+        return jsonify({"error": "Role must be 'user', 'assistant', or 'system'"}), 400
+    
+    # Validate content
+    if not isinstance(content, str) or len(content.strip()) == 0:
+        return jsonify({"error": "Content must be a non-empty string"}), 400
+    
+    # Trim whitespace
+    content = content.strip()
+    
+    try:
+        # Debug: Log user information
+        current_app.logger.info(f"User ID from token: {user.id}")
+        current_app.logger.info(f"Conversation ID: {conversation_id}")
+        
+        # First verify the conversation exists and user owns it
+        conversation_response = current_app.supabase.table('lifelines_conversations').select(
+            "id, user_id"
+        ).eq("id", conversation_id).execute()
+        
+        current_app.logger.info(f"Conversation response: {conversation_response.data}")
+        
+        if not conversation_response.data:
+            return jsonify({"error": "Conversation not found"}), 404
+        
+        conversation = conversation_response.data[0]
+        current_app.logger.info(f"Conversation user_id: {conversation.get('user_id')}")
+        current_app.logger.info(f"Token user_id: {user.id}")
+        
+        # Check if user owns the conversation
+        if conversation.get('user_id') != user.id:
+            return jsonify({"error": "Access denied - conversation belongs to different user"}), 403
+        
+        # Insert new message
+        response = current_app.supabase.table('lifelines_messages').insert({
+            "conversation_id": conversation_id,
+            "user_id": user.id,
+            "role": role,
+            "content": content
+        }).execute()
+        
+        if not response.data:
+            return jsonify({"error": "Failed to create message"}), 500
+        
+        message = response.data[0]
+        
+        # Update conversation's updated_at timestamp
+        current_app.supabase.table('lifelines_conversations').update({
+            "updated_at": datetime.utcnow().isoformat()
+        }).eq("id", conversation_id).execute()
+        
+        return jsonify({
+            "message": "Message created successfully",
+            "message_data": {
+                "id": message["id"],
+                "conversation_id": message["conversation_id"],
+                "role": message["role"],
+                "content": message["content"],
+                "created_at": message["created_at"],
+                "updated_at": message["updated_at"]
+            }
+        }), 201
+        
+    except Exception as e:
+        current_app.logger.error(f"Error creating message: {e}")
+        return jsonify({"error": "Failed to create message"}), 500
+
+# --- GET MESSAGES FOR CONVERSATION ENDPOINT ---
+@conversations_bp.route("/<conversation_id>/messages", methods=["GET"])
+@token_required
+def get_messages(user, conversation_id):
+    """
+    Get paginated messages for a specific conversation.
+    Query params:
+      - page: 1-based page number (default 1)
+      - limit: items per page (default 10, max 50)
+    Response:
+      {
+        "items": [{"id": "...", "role": "...", "content": "...", "created_at": "..."}, ...],
+        "page": 1,
+        "limit": 10,
+        "total": 42,
+        "total_pages": 5,
+        "has_next": true,
+        "has_prev": false
+      }
+    """
+    try:
+        # Debug: Log user information
+        current_app.logger.info(f"User ID from token: {user.id}")
+        current_app.logger.info(f"Conversation ID: {conversation_id}")
+        
+        # First verify the conversation exists and user owns it
+        conversation_response = current_app.supabase.table('lifelines_conversations').select(
+            "id, user_id"
+        ).eq("id", conversation_id).execute()
+        
+        current_app.logger.info(f"Conversation response: {conversation_response.data}")
+        
+        if not conversation_response.data:
+            return jsonify({"error": "Conversation not found"}), 404
+        
+        conversation = conversation_response.data[0]
+        current_app.logger.info(f"Conversation user_id: {conversation.get('user_id')}")
+        current_app.logger.info(f"Token user_id: {user.id}")
+        
+        # Check if user owns the conversation
+        if conversation.get('user_id') != user.id:
+            return jsonify({"error": "Access denied - conversation belongs to different user"}), 403
+        
+        # Parse and validate parameters
+        try:
+            page = int(request.args.get("page", 1))
+            limit = int(request.args.get("limit", 10))
+        except (TypeError, ValueError):
+            page = 1
+            limit = 10
+        
+        # Clamp values
+        page = max(page, 1)
+        limit = max(1, min(limit, 50))  # Limit between 1 and 50
+        
+        start = (page - 1) * limit
+        end = start + limit - 1  # inclusive end for Supabase .range()
+        
+        # Get messages for the conversation (ordered by creation time)
+        response = (
+            current_app.supabase
+                .table("lifelines_messages")
+                .select("id, role, content, created_at, updated_at", count="exact")
+                .eq("conversation_id", conversation_id)
+                .order("created_at", desc=False)  # Oldest first (chronological order)
+                .range(start, end)
+                .execute()
+        )
+        
+        items = response.data or []
+        total = response.count or 0
+        total_pages = ceil(total / limit) if total > 0 else 0
+        
+        return jsonify({
+            "items": items,
+            "page": page,
+            "limit": limit,
+            "total": total,
+            "total_pages": total_pages,
+            "has_next": page < total_pages,
+            "has_prev": page > 1
+        }), 200
+        
+    except Exception as e:
+        current_app.logger.error(f"Error getting messages: {e}")
+        return jsonify({"error": "Failed to get messages"}), 500
