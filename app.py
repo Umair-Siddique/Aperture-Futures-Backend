@@ -1,10 +1,10 @@
 from flask import Flask
 from config import Config
-from dotenv import load_dotenv
 from extensions import init_supabase,init_groq,init_anthropic,init_openai_embeddings,init_pinecone
 from blueprints.auth import auth_bp
 from blueprints.transcribe import transcribe_bp
-from blueprints.transcribe_video import transcribe_video_bp
+from blueprints.transcribe_video import transcribe_bp
+from blueprints.conversations import conversations_bp
 
 from flask_cors import CORS
 
@@ -25,6 +25,6 @@ def create_app():
     # Register blueprints
     app.register_blueprint(auth_bp, url_prefix="/auth")
     app.register_blueprint(transcribe_bp,url_prefix="/transcribe")
-    app.register_blueprint(transcribe_video_bp,url_prefix="/transcribe_video")
+    app.register_blueprint(conversations_bp,url_prefix="/conversations")
 
     return app
