@@ -199,17 +199,6 @@ def get_conversation(user, conversation_id):
     except Exception as e:
         current_app.logger.error(f"Error getting conversation: {e}")
         return jsonify({"error": "Failed to get conversation"}), 500
-    
-
-
-
-
-# --- CREATE MESSAGE ENDPOINT ---
-
-
-# ... existing code ...
-
-# ... existing code ...
 
 # --- CREATE MESSAGE ENDPOINT ---
 @conversations_bp.route("/<conversation_id>/messages", methods=["POST"])

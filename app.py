@@ -5,6 +5,7 @@ from blueprints.auth import auth_bp
 from blueprints.transcribe import transcribe_bp
 from blueprints.transcribe_video import transcribe_bp
 from blueprints.conversations import conversations_bp
+from blueprints.forgot_password import forgot_password_bp
 
 from flask_cors import CORS
 
@@ -26,5 +27,6 @@ def create_app():
     app.register_blueprint(auth_bp, url_prefix="/auth")
     app.register_blueprint(transcribe_bp,url_prefix="/transcribe")
     app.register_blueprint(conversations_bp,url_prefix="/conversations")
+    app.register_blueprint(forgot_password_bp,url_prefix="/forgot_password")
 
     return app
