@@ -17,8 +17,8 @@ from config import Config
 from .auth import token_required
 
 # ---- Blueprint ----
-# transcribe_video_bp = Blueprint("transcribe_video", __name__)
-transcribe_bp = Blueprint('transcribe', __name__)
+transcribe_video_bp = Blueprint("transcribe_video", __name__)
+# transcribe_bp = Blueprint('transcribe', __name__)
 
 # ---- OpenAI client for Whisper-1 ----
 client = OpenAI(api_key=Config.OPENAI_API_KEY)
@@ -137,24 +137,41 @@ def transcribe_audio_with_openai(audio_path: str):
         current_app.logger.error("Transcription error: %s", e)
         return None
 
+import re
+import unicodedata
+
+def sanitize_id(name: str) -> str:
+    """Sanitize string for Pinecone namespace/vector IDs (ASCII only)."""
+    normalized = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
+    sanitized = re.sub(r'[^a-zA-Z0-9_-]', '_', normalized)
+    return sanitized.lower()
+
 # ---- VIDEO -> TRANSCRIBE -> EMBED ----
-@transcribe_bp.route("/video", methods=["POST"])
+@transcribe_video_bp.route("/video", methods=["POST"])
 @token_required
 def transcribe_video_and_store(user):
     """
     Form-data:
-      - title (str)            REQUIRED (must be unique)
-      - description (str)      REQUIRED
-      - url (str)              REQUIRED (video URL)
-    Returns (matches /audio response shape):
-      { "title", "description", "timestamp", "chunks_stored" }
+      - title (str)        REQUIRED (must be unique)
+      - description (str)  REQUIRED
+      - url (str)          REQUIRED (video URL)
+      - members (str)      REQUIRED (comma-separated list)
+    Returns:
+      { "title", "description", "members", "url", "timestamp", "chunks_stored" }
     """
     title = request.form.get("title")
     description = request.form.get("description")
     video_url = request.form.get("url") or request.form.get("video_url")
+    members_raw = request.form.get("members")
 
-    if not title or not description or not video_url:
-        return jsonify({"error": "title, description, and url are required"}), 400
+    # --- Validation ---
+    if not title or not description or not video_url or not members_raw:
+        return jsonify({"error": "title, description, url, and members are required"}), 400
+
+    # Parse members into list
+    members_list = [m.strip() for m in members_raw.split(",") if m.strip()]
+    if not members_list:
+        return jsonify({"error": "members cannot be empty"}), 400
 
     # Ensure URL is valid-ish
     parsed = urlparse(video_url)
@@ -166,13 +183,14 @@ def transcribe_video_and_store(user):
     if exists.data:
         return jsonify({"error": f"title '{title}' already exists"}), 409
 
-    # Insert metadata row BEFORE work (same as your /audio)
     now_epoch = int(time.time())
 
+    # --- Store metadata in Supabase (NO transcript here) ---
     try:
         current_app.supabase.table("audio_files").insert({
             "title": title,
             "description": description,
+            "members": members_list,
             "timestamp": now_epoch,
         }).execute()
     except Exception as e:
@@ -199,8 +217,9 @@ def transcribe_video_and_store(user):
         # 4) Chunk
         chunks = preprocess_and_chunk(transcript)
 
-        # 5) Embed + upsert (Pinecone namespace = title)
+        # 5) Embed + upsert into Pinecone
         def batch_embed_and_upsert(chunks_list, batch_size=16):
+            safe_namespace = sanitize_id(title)   # same safe ID logic from /audio
             total = 0
             for i in range(0, len(chunks_list), batch_size):
                 batch_chunks = chunks_list[i:i + batch_size]
@@ -208,12 +227,11 @@ def transcribe_video_and_store(user):
                 vectors = []
                 for j, (vec, chunk) in enumerate(zip(batch_embeds, batch_chunks)):
                     vectors.append((
-                        f"{title}_{i + j}",
+                        f"{safe_namespace}_{i + j}",   # safe vector ID
                         vec,
-                        {"text": chunk, "description": description},
+                        {"text": chunk},               # ONLY transcript text
                     ))
-                # Upsert per-batch to keep memory steady
-                current_app.pinecone_index.upsert(vectors=vectors, namespace=title)
+                current_app.pinecone_index.upsert(vectors=vectors, namespace=safe_namespace)
                 total += len(vectors)
             return total
 
@@ -222,7 +240,9 @@ def transcribe_video_and_store(user):
         return jsonify({
             "title": title,
             "description": description,
-            "timestamp": now_epoch,          # matches your /audio response (epoch)
+            "members": members_list,
+            "url": video_url,
+            "timestamp": now_epoch,
             "chunks_stored": chunks_stored,
         }), 200
 

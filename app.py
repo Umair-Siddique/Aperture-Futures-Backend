@@ -3,7 +3,7 @@ from config import Config
 from extensions import init_supabase,init_groq,init_anthropic,init_openai_embeddings,init_pinecone
 from blueprints.auth import auth_bp
 from blueprints.transcribe import transcribe_bp
-from blueprints.transcribe_video import transcribe_bp
+from blueprints.transcribe_video import transcribe_video_bp
 from blueprints.conversations import conversations_bp
 from blueprints.forgot_password import forgot_password_bp
 
@@ -28,5 +28,5 @@ def create_app():
     app.register_blueprint(transcribe_bp,url_prefix="/transcribe")
     app.register_blueprint(conversations_bp,url_prefix="/conversations")
     app.register_blueprint(forgot_password_bp,url_prefix="/forgot_password")
-
+    app.register_blueprint(transcribe_video_bp,url_prefix="/transcribe_video")
     return app

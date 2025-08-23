@@ -10,6 +10,9 @@ import hashlib
 import time
 import smtplib
 from email.mime.text import MIMEText
+from datetime import datetime, timedelta, timezone
+from urllib.parse import unquote_plus
+
 
 forgot_password_bp = Blueprint('forgot_password', __name__)
 
@@ -48,6 +51,25 @@ class ResetPasswordSchema(Schema):
         'required': 'New password is required',
         'validator_failed': 'Password does not meet security requirements'
     })
+
+def utcnow_iso_z() -> str:
+    """Return current UTC time as ISO8601 with Z."""
+    return datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+
+def parse_iso_to_utc(dt_str: str) -> datetime:
+    """
+    Parse an ISO8601 string to a tz-aware UTC datetime.
+    Accepts values with 'Z' or explicit offsets. If naive, assume UTC.
+    """
+    if not isinstance(dt_str, str):
+        raise ValueError("Invalid datetime string")
+    # Normalize Z to +00:00 for fromisoformat
+    dt = datetime.fromisoformat(dt_str.replace('Z', '+00:00'))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 
 # --- Security Helper Functions ---
 def get_client_ip():
@@ -126,73 +148,162 @@ def hash_token(token):
     """Hash token for secure storage."""
     return hashlib.sha256(token.encode()).hexdigest()
 
+def get_user_id_by_email(email: str) -> str | None:
+    """
+    Resolve a Supabase Auth user id by email (case-insensitive).
+    Tries PostgREST on auth.users, then admin.list_users pagination.
+    Requires SERVICE ROLE key for direct auth.users access.
+    """
+    if not email:
+        return None
+    email_norm = email.strip().lower()
+
+    # --- Fast path A: PostgREST on auth.users (canonical) ---
+    try:
+        # supabase-py v2 canonical way to hit a non-public schema:
+        # use the postgrest client, select from auth.users
+        resp = (current_app.supabase
+                .postgrest
+                .schema('auth')
+                .from_('users')
+                .select('id,email')
+                .eq('email', email_norm)
+                .single()
+                .execute())
+        data = getattr(resp, 'data', None)
+        if data and data.get('id'):
+            return data['id']
+    except Exception as e:
+        print(f"[get_user_id_by_email] postgrest.schema('auth').from_('users') failed: {e}")
+
+    # --- Fast path B: Some client versions support schema kw on table() ---
+    try:
+        # Not all supabase-py builds support schema= on table(); safe to try.
+        resp2 = (current_app.supabase
+                 .table('users', schema='auth')
+                 .select('id,email')
+                 .eq('email', email_norm)
+                 .single()
+                 .execute())
+        data2 = getattr(resp2, 'data', None)
+        if data2 and data2.get('id'):
+            return data2['id']
+    except Exception as e:
+        print(f"[get_user_id_by_email] table('users', schema='auth') failed: {e}")
+
+    # --- Fallback: paginate admin.list_users (works everywhere w/ service role) ---
+    try:
+        admin = getattr(current_app.supabase, 'auth', None)
+        admin = getattr(admin, 'admin', None)
+        if admin is None:
+            print("[get_user_id_by_email] admin client missing")
+            return None
+
+        page = 1
+        per_page = 100
+        while True:
+            try:
+                listing = admin.list_users(page=page, per_page=per_page)
+            except TypeError:
+                listing = admin.list_users(page, per_page)  # older signatures
+
+            users = getattr(listing, 'users', None) or []
+            if not users:
+                break
+
+            for u in users:
+                u_email = getattr(u, 'email', None)
+                if u_email and u_email.strip().lower() == email_norm:
+                    return getattr(u, 'id', None)
+
+            if len(users) < per_page:
+                break
+            page += 1
+    except Exception as e:
+        print(f"[get_user_id_by_email] admin.list_users failed: {e}")
+
+    return None
+
+
 # --- API Endpoints with Enhanced Security ---
 
 @forgot_password_bp.route('/request-reset', methods=['POST'])
 def request_password_reset():
     """Request a password reset with comprehensive security checks."""
+    # local import to avoid top-level dependency if you prefer
+    from urllib.parse import quote_plus
+
     start_time = time.time()
     client_ip = get_client_ip()
     user_agent = request.headers.get('User-Agent', 'Unknown')
 
     try:
-        # Validate input
+        # 1) Validate input
         schema = ForgotPasswordSchema()
         data = schema.load(request.get_json() or {})
-        email = data['email'].lower().strip()
+        email = (data['email'] or '').strip().lower()
 
-        # Security checks
+        # 2) Security checks
         is_suspicious, _ = is_suspicious_request(email, client_ip)
         if is_suspicious:
             log_attempt(email, client_ip, user_agent, 'request', False)
             return jsonify({'message': 'Request blocked for security reasons'}), 403
 
-        # Rate limiting
+        # 3) Rate limiting
         if not check_rate_limit(email, client_ip, 'request'):
             log_attempt(email, client_ip, user_agent, 'request', False)
             return jsonify({'message': 'Too many requests. Please try again later.'}), 429
 
-        # Generate secure token
+        # 4) Generate secure token + hash for storage
         token = generate_secure_token()
         token_hash = hash_token(token)
 
-        # Create reset record
+        # 5) Persist reset record (UTC with Z)
+        expires_at_dt = datetime.now(timezone.utc) + timedelta(hours=SECURITY_CONFIG['TOKEN_EXPIRY_HOURS'])
         reset_data = {
             'id': str(uuid.uuid4()),
             'email': email,
             'token': token_hash,
-            'expires_at': (datetime.utcnow() + timedelta(hours=SECURITY_CONFIG['TOKEN_EXPIRY_HOURS'])).isoformat(),
+            'expires_at': expires_at_dt.isoformat().replace('+00:00', 'Z'),
             'ip_address': client_ip,
             'user_agent': user_agent,
             'used': False,
-            'created_at': datetime.utcnow().isoformat()
+            'created_at': utcnow_iso_z()
         }
 
         try:
             current_app.supabase.table('password_resets').insert(reset_data).execute()
         except Exception as e:
-            print(f"Error creating reset record: {e}")
+            print(f"[request-reset] Error creating reset record: {e}")
             log_attempt(email, client_ip, user_agent, 'request', False)
             return jsonify({'message': 'Service temporarily unavailable. Please try again.'}), 503
 
-        # Build reset URL (prefer configured base if provided)
-        reset_base = current_app.config.get('PASSWORD_RESET_URL_BASE')
-        if reset_base:
-            reset_url = f"{reset_base}?token={token}"
-        else:
-            reset_url = f"{request.host_url}reset-password?token={token}"
+        # 6) Build reset URL (prefer configured base if provided)
+        # Expect PASSWORD_RESET_URL_BASE like: https://your-frontend/reset-password
+        reset_base = (current_app.config.get('PASSWORD_RESET_URL_BASE') or f"{request.host_url.rstrip('/')}/reset-password")
+        # URL-encode the token so email clients don't mangle it
+        encoded_token = quote_plus(token)
+        reset_url = f"{reset_base}?token={encoded_token}"
 
-        # Send email
-        send_reset_email(email, reset_url)
+        # 7) Send email
+        try:
+            send_reset_email(email, reset_url)
+        except Exception as e:
+            print(f"[request-reset] Error sending email: {e}")
+            # (Optional) best-effort cleanup if email fails:
+            # current_app.supabase.table('password_resets').delete().eq('id', reset_data['id']).execute()
+            log_attempt(email, client_ip, user_agent, 'request', False)
+            return jsonify({'message': 'Failed to send reset email. Please try again later.'}), 500
 
-        # Log successful attempt
+        # 8) Log success
         log_attempt(email, client_ip, user_agent, 'request', True)
 
-        # Add artificial delay to prevent timing attacks
-        elapsed_time = time.time() - start_time
-        if elapsed_time < 1.0:
-            time.sleep(1.0 - elapsed_time)
+        # 9) Add artificial delay to reduce timing side-channels
+        elapsed = time.time() - start_time
+        if elapsed < 1.0:
+            time.sleep(1.0 - elapsed)
 
+        # 10) Always use neutral response (no user enumeration)
         return jsonify({
             'message': 'If an account with this email exists, a password reset link has been sent.',
             'email': email
@@ -205,6 +316,8 @@ def request_password_reset():
         traceback.print_exc()
         log_attempt(email if 'email' in locals() else 'unknown', client_ip, user_agent, 'request', False)
         return jsonify({'message': 'An error occurred while processing your request'}), 500
+
+
 
 def send_reset_email(to_email, reset_url):
 	# Build HTML template
@@ -243,21 +356,19 @@ def verify_reset_token():
     user_agent = request.headers.get('User-Agent', 'Unknown')
     
     try:
-        data = request.get_json()
-        if not data or not data.get('token'):
-            return jsonify({
-                'message': 'Token is required'
-            }), 400
-        
-        token = data['token']
+        data = request.get_json() or {}
+        raw_token = (data.get('token') or '').strip()
+        if not raw_token:
+            return jsonify({'message': 'Token is required'}), 400
+
+        # Normalize token (handles URL-encoded values and stray spaces)
+        token = unquote_plus(raw_token)
         token_hash = hash_token(token)
         
         # Rate limiting
         if not check_rate_limit('unknown', client_ip, 'verify'):
             log_attempt('unknown', client_ip, user_agent, 'verify', False)
-            return jsonify({
-                'message': 'Too many verification attempts. Please try again later.'
-            }), 429
+            return jsonify({'message': 'Too many verification attempts. Please try again later.'}), 429
         
         # Get reset record
         try:
@@ -268,139 +379,139 @@ def verify_reset_token():
         
         if not reset_record:
             log_attempt('unknown', client_ip, user_agent, 'verify', False)
-            return jsonify({
-                'message': 'Invalid or expired reset token'
-            }), 400
+            return jsonify({'message': 'Invalid or expired reset token'}), 400
         
         # Check if token is already used
         if reset_record.get('used', False):
             log_attempt(reset_record['email'], client_ip, user_agent, 'verify', False)
-            return jsonify({
-                'message': 'This reset token has already been used'
-            }), 400
+            return jsonify({'message': 'This reset token has already been used'}), 400
         
-        # Check if token is expired
-        if datetime.fromisoformat(reset_record['expires_at'].replace('Z', '+00:00')) < datetime.utcnow():
+        # Check if token is expired (tz-aware UTC comparison)
+        try:
+            exp = parse_iso_to_utc(reset_record['expires_at'])
+        except Exception:
             log_attempt(reset_record['email'], client_ip, user_agent, 'verify', False)
-            return jsonify({
-                'message': 'Reset token has expired'
-            }), 400
+            return jsonify({'message': 'Invalid token expiry format'}), 400
+
+        now = datetime.now(timezone.utc)
+        if exp < now:
+            log_attempt(reset_record['email'], client_ip, user_agent, 'verify', False)
+            return jsonify({'message': 'Reset token has expired'}), 400
         
         log_attempt(reset_record['email'], client_ip, user_agent, 'verify', True)
         
-        return jsonify({
-            'message': 'Token is valid',
-            'email': reset_record['email']
-        }), 200
+        return jsonify({'message': 'Token is valid', 'email': reset_record['email']}), 200
         
-    except Exception as e:
+    except Exception:
         traceback.print_exc()
         log_attempt('unknown', client_ip, user_agent, 'verify', False)
-        return jsonify({
-            'message': 'An error occurred while verifying token'
-        }), 500
+        return jsonify({'message': 'An error occurred while verifying token'}), 500
+
 
 @forgot_password_bp.route('/reset-password', methods=['POST'])
 def reset_password():
     """Reset password with comprehensive security validation."""
     client_ip = get_client_ip()
     user_agent = request.headers.get('User-Agent', 'Unknown')
-    
+
     try:
-        # Validate input
+        # ---- 1) Validate input & normalize token ----
         schema = ResetPasswordSchema()
-        data = schema.load(request.get_json() or {})
+        payload = request.get_json() or {}
+        payload['token'] = unquote_plus((payload.get('token') or '').strip())
+        data = schema.load(payload)
+
         token = data['token']
         new_password = data['password']
         token_hash = hash_token(token)
-        
-        # Rate limiting
+
+        # ---- 2) Rate limit ----
         if not check_rate_limit('unknown', client_ip, 'reset'):
             log_attempt('unknown', client_ip, user_agent, 'reset', False)
-            return jsonify({
-                'message': 'Too many reset attempts. Please try again later.'
-            }), 429
-        
-        # Get reset record
+            return jsonify({'message': 'Too many reset attempts. Please try again later.'}), 429
+
+        # ---- 3) Lookup reset record ----
         try:
-            response = current_app.supabase.table('password_resets').select('*').eq('token', token_hash).single().execute()
-            reset_record = response.data if response.data else None
+            resp = current_app.supabase.table('password_resets') \
+                .select('*').eq('token', token_hash).single().execute()
+            reset_record = resp.data if resp and resp.data else None
         except Exception:
             reset_record = None
-        
+
         if not reset_record:
             log_attempt('unknown', client_ip, user_agent, 'reset', False)
-            return jsonify({
-                'message': 'Invalid or expired reset token'
-            }), 400
-        
-        # Check if token is already used
+            return jsonify({'message': 'Invalid or expired reset token'}), 400
+
         if reset_record.get('used', False):
             log_attempt(reset_record['email'], client_ip, user_agent, 'reset', False)
-            return jsonify({
-                'message': 'This reset token has already been used'
-            }), 400
-        
-        # Check if token is expired
-        if datetime.fromisoformat(reset_record['expires_at'].replace('Z', '+00:00')) < datetime.utcnow():
-            log_attempt(reset_record['email'], client_ip, user_agent, 'reset', False)
-            return jsonify({
-                'message': 'Reset token has expired'
-            }), 400
-        
-        # Update user password
+            return jsonify({'message': 'This reset token has already been used'}), 400
+
+        # ---- 4) Expiry (UTC, tz-aware) ----
         try:
-            response = current_app.supabase.auth.admin.list_users()
-            user = None
-            for u in response.users:
-                if u.email.lower() == reset_record['email'].lower():
-                    user = u
-                    break
-            
-            if not user:
-                log_attempt(reset_record['email'], client_ip, user_agent, 'reset', False)
-                return jsonify({
-                    'message': 'User not found'
-                }), 404
-            
-            # Update password
-            current_app.supabase.auth.admin.update_user_by_id(
-                user.id,
-                {"password": new_password}
-            )
-            
-            # Mark token as used
+            exp = datetime.fromisoformat(reset_record['expires_at'].replace('Z', '+00:00'))
+            if exp.tzinfo is None:
+                exp = exp.replace(tzinfo=timezone.utc)
+            now = datetime.now(timezone.utc)
+        except Exception:
+            log_attempt(reset_record['email'], client_ip, user_agent, 'reset', False)
+            return jsonify({'message': 'Invalid token expiry format'}), 400
+
+        if exp < now:
+            log_attempt(reset_record['email'], client_ip, user_agent, 'reset', False)
+            return jsonify({'message': 'Reset token has expired'}), 400
+
+        # ---- 5) Ensure Admin client (SERVICE ROLE) is present ----
+        admin = getattr(current_app.supabase, 'auth', None)
+        admin = getattr(admin, 'admin', None)
+        if admin is None:
+            log_attempt(reset_record['email'], client_ip, user_agent, 'reset', False)
+            return jsonify({'message': 'Server misconfigured: admin client unavailable.'}), 500
+
+        # quick permission probe
+        try:
+            try:
+                admin.list_users(page=1, per_page=1)
+            except TypeError:
+                admin.list_users(1, 1)
+        except Exception:
+            log_attempt(reset_record['email'], client_ip, user_agent, 'reset', False)
+            return jsonify({'message': 'Server is not authorized to change passwords (service role key required).'}), 401
+
+        # ---- 6) Resolve user id by email ----
+        user_id = get_user_id_by_email(reset_record['email'])
+        if not user_id:
+            log_attempt(reset_record['email'], client_ip, user_agent, 'reset', False)
+            return jsonify({'message': 'User not found'}), 404
+
+        # ---- 7) Update password ----
+        try:
+            admin.update_user_by_id(user_id, {"password": new_password})
+        except Exception as upd_err:
+            print(f"Error updating password: {upd_err}")
+            log_attempt(reset_record['email'], client_ip, user_agent, 'reset', False)
+            return jsonify({'message': 'Failed to update password. Please try again.'}), 500
+
+        # ---- 8) Mark token as used ----
+        try:
             current_app.supabase.table('password_resets').update({
                 'used': True,
                 'attempts': reset_record.get('attempts', 0) + 1,
-                'last_attempt': datetime.utcnow().isoformat()
+                'last_attempt': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
             }).eq('token', token_hash).execute()
-            
-            log_attempt(reset_record['email'], client_ip, user_agent, 'reset', True)
-            
-            return jsonify({
-                'message': 'Password reset successfully. You can now sign in with your new password.'
-            }), 200
-            
-        except Exception as e:
-            print(f"Error updating password: {e}")
-            log_attempt(reset_record['email'], client_ip, user_agent, 'reset', False)
-            return jsonify({
-                'message': 'Failed to update password. Please try again.'
-            }), 500
-        
+        except Exception as upd2_err:
+            print(f"Warning: failed to mark token used: {upd2_err}")
+
+        log_attempt(reset_record['email'], client_ip, user_agent, 'reset', True)
+        return jsonify({'message': 'Password reset successfully. You can now sign in with your new password.'}), 200
+
     except ValidationError as e:
         log_attempt('unknown', client_ip, user_agent, 'reset', False)
-        return jsonify({
-            'message': 'Validation error',
-            'errors': e.messages
-        }), 400
+        return jsonify({'message': 'Validation error', 'errors': e.messages}), 400
     except Exception as e:
         traceback.print_exc()
         log_attempt('unknown', client_ip, user_agent, 'reset', False)
-        return jsonify({
-            'message': 'An error occurred while resetting password'
-        }), 500
+        return jsonify({'message': 'An error occurred while resetting password'}), 500
+
 
 # --- Security Monitoring Endpoints (Admin Only) ---
 
