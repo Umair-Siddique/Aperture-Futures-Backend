@@ -250,25 +250,25 @@ def delete_transcription(user):
     if not title:
         return jsonify({"error": "Title is required"}), 400
 
-    safe_title = sanitize_id(title)
+    safe_namespace = sanitize_id(title)
 
     try:
-        # 1. Delete from Supabase (raw title)
+        # 1. Delete from Supabase (raw title, because that's what we stored there)
         resp = (
             current_app.supabase
             .table("audio_files")
             .delete()
-            .eq("title", title)   # raw title, since that's how it was stored
+            .eq("title", title)   # match the original stored title
             .execute()
         )
 
         if not resp.data:
             return jsonify({"error": f"No transcription found with title '{title}'"}), 404
 
-        # 2. Delete entire namespace from Pinecone
+        # 2. Delete from Pinecone (use sanitized namespace!)
         try:
             current_app.pinecone_index.delete(
-                namespace=title,
+                namespace=safe_namespace,
                 delete_all=True
             )
         except Exception as e:
@@ -280,6 +280,7 @@ def delete_transcription(user):
     except Exception as e:
         current_app.logger.error("Delete error: %s", e)
         return jsonify({"error": "Failed to delete transcription"}), 500
+
 
 
 # -------------------- /video Endpoint --------------------
