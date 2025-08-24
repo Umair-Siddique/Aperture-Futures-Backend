@@ -21,4 +21,4 @@ def init_openai_embeddings(app):
 
 def init_pinecone(app):
     pc = Pinecone(api_key=Config.PINECONE_API_KEY)
-    app.pinecone_index = pc.Index(Config.MEETING_TRANSCRIPTS_INDEX)
+    app.pinecone_index = pc.Index(name=Config.MEETING_TRANSCRIPTS_INDEX,host=Config.PINECONE_HOST)

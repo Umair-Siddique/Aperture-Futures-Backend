@@ -14,6 +14,7 @@ class Config:
 		CLAUDE_API_KEY=os.getenv("CLAUDE_API_KEY")
 		PINECONE_ENV=os.getenv("PINECONE_ENVIRONMENT")
 		MEETING_TRANSCRIPTS_INDEX=os.getenv("MEETING_TRANSCRIPTS_INDEX")
+		PINECONE_HOST=os.getenv('PINECONE_HOST')
 
 		# SMTP / Email settings
 		SMTP_HOST = os.getenv("SMTP_HOST", "smtp.protonmail.ch")
