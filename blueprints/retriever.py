@@ -4,6 +4,7 @@ import unicodedata
 from openai import OpenAI
 from config import Config
 from .auth import token_required
+from datetime import datetime
 
 retriever_bp = Blueprint('retriever', __name__)
 
@@ -16,13 +17,30 @@ def sanitize_id(name: str) -> str:
 @retriever_bp.route("/query", methods=["POST"])
 @token_required
 def retrieve_transcript(user):
+    # Expect: query, title (for Pinecone namespace), conversation_id (to log messages)
     query = request.form.get("query")
     title = request.form.get("title")
+    conversation_id = request.form.get("conversation_id")
 
-    if not query or not title:
-        return jsonify({"error": "Both 'query' and 'title' are required"}), 400
+    if not query or not title or not conversation_id:
+        return jsonify({"error": "Fields 'query', 'title', and 'conversation_id' are required"}), 400
 
-    # 1) Fetch description + members from Supabase
+    # ---- (A) Verify conversation ownership ----
+    try:
+        conv = (
+            current_app.supabase
+            .table('lifelines_conversations')
+            .select('id, user_id')
+            .eq('id', conversation_id)
+            .single()
+            .execute()
+        )
+        if not conv.data or conv.data.get('user_id') != user.id:
+            return jsonify({"error": "Conversation not found or access denied"}), 403
+    except Exception as e:
+        return jsonify({"error": f"Supabase error (conversation check): {str(e)}"}), 500
+
+    # ---- (B) Fetch description + members from Supabase (for retrieval prompt) ----
     try:
         record = (
             current_app.supabase
@@ -44,7 +62,7 @@ def retrieve_transcript(user):
     else:
         members = raw_members or []
 
-    # 2) Retrieve context from Pinecone
+    # ---- (C) Retrieve context from Pinecone ----
     try:
         query_embedding = current_app.embeddings.embed_query(query)
     except Exception as e:
@@ -69,7 +87,7 @@ def retrieve_transcript(user):
     ]
     combined_context = "\n".join(c for c in contexts if c).strip()
 
-    # 3) Build RAG prompt (explicitly ask for Markdown)
+    # ---- (D) Build RAG prompt ----
     system_prompt = (
         "You are a helpful assistant for meeting Q&A. "
         "Always respond in **valid GitHub-Flavored Markdown**. "
@@ -85,9 +103,26 @@ def retrieve_transcript(user):
         "### Answer\n"
     )
 
-    # 4) Stream only the assistant's Markdown text (no SSE framing)
-    def generate():
+    # ---- (E) Save the user's query as a message (role='user') before streaming ----
+    try:
+        current_app.supabase.table('lifelines_messages').insert({
+            "conversation_id": conversation_id,
+            "user_id": user.id,
+            "role": "user",
+            "content": query
+        }).execute()
+
+        # bump parent conversation updated_at
+        current_app.supabase.table('lifelines_conversations').update({
+            "updated_at": datetime.utcnow().isoformat()
+        }).eq("id", conversation_id).execute()
+    except Exception as e:
+        return jsonify({"error": f"Failed to persist user query: {str(e)}"}), 500
+
+    # ---- (F) Stream LLM response, buffer it, then save as assistant message ----
+    def generate_stream_and_persist():
         client = OpenAI(api_key=Config.OPENAI_API_KEY)
+        assistant_text = ""
         try:
             stream = client.chat.completions.create(
                 model="gpt-3.5-turbo",
@@ -97,17 +132,15 @@ def retrieve_transcript(user):
                 ],
                 max_tokens=3500,
                 temperature=0.7,
-                stream=True,  # stream markdown chunks
+                stream=True,
             )
 
             for chunk in stream:
                 delta = None
-                # Primary (OpenAI SDK 1.x) path
                 try:
                     delta = chunk.choices[0].delta.content
                 except Exception:
                     pass
-                # Fallback for any alternative event shape
                 if not delta:
                     try:
                         if getattr(chunk, "type", None) in ("token", "response.output_text.delta"):
@@ -116,16 +149,50 @@ def retrieve_transcript(user):
                         pass
 
                 if delta:
+                    assistant_text += delta
                     yield delta
 
         except Exception as e:
-            # Emit error inline in the stream so you see it in Postman
-            yield f"\n\n> **Streaming error:** `{str(e)}`\n"
+            err_md = f"\n\n> **Streaming error:** `{str(e)}`\n"
+            assistant_text_local = assistant_text + err_md
+            # Still try to persist what we have, including error message
+            try:
+                current_app.supabase.table('lifelines_messages').insert({
+                    "conversation_id": conversation_id,
+                    "user_id": user.id,
+                    "role": "assistant",
+                    "content": assistant_text_local
+                }).execute()
+                current_app.supabase.table('lifelines_conversations').update({
+                    "updated_at": datetime.utcnow().isoformat()
+                }).eq("id", conversation_id).execute()
+            except Exception:
+                pass
+            yield err_md
+            return
+
+        # Persist the full assistant message and bump updated_at
+        try:
+            current_app.supabase.table('lifelines_messages').insert({
+                "conversation_id": conversation_id,
+                "user_id": user.id,
+                "role": "assistant",
+                "content": assistant_text
+            }).execute()
+            current_app.supabase.table('lifelines_conversations').update({
+                "updated_at": datetime.utcnow().isoformat()
+            }).eq("id", conversation_id).execute()
+        except Exception as e:
+            # Emit a footer note so the client knows persistence failed
+            yield f"\n\n> **Note:** Failed to save assistant message: `{str(e)}`\n"
 
     headers = {
         "Cache-Control": "no-cache, no-transform",
-        "X-Accel-Buffering": "no",   # disables Nginx buffering if present
+        "X-Accel-Buffering": "no",
         "Connection": "keep-alive",
     }
-    # Important: text/markdown so Postman (and other clients) know it's Markdown
-    return Response(stream_with_context(generate()), headers=headers, mimetype="text/markdown; charset=utf-8")
+    return Response(
+        stream_with_context(generate_stream_and_persist()),
+        headers=headers,
+        mimetype="text/markdown; charset=utf-8"
+    )
