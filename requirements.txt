@@ -19,3 +19,4 @@ openai-whisper
 langchain_experimental
 yt-dlp
 gunicorn
+ffmpeg-python
