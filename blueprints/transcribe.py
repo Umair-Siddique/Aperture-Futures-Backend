@@ -2,7 +2,7 @@ from flask import Blueprint, request, jsonify, current_app
 from werkzeug.utils import secure_filename
 import os
 import time
-import whisper
+# import whisper  # Remove this import
 import uuid
 import tempfile
 import re
@@ -77,10 +77,8 @@ def transcribe_and_store(user):
         "timestamp": timestamp
     }).execute()
 
-    # Transcribe with Whisper
-    model = whisper.load_model("base")
-    result = model.transcribe(filepath)
-    transcript = result.get("text", "")
+    # Transcribe with OpenAI Whisper API instead of local model
+    transcript = transcribe_audio_with_openai(filepath)
 
     if not transcript:
         os.remove(filepath)

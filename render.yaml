@@ -1,0 +1,57 @@
+services:
+  - type: web
+    name: lifelines-backend
+    env: python
+    plan: starter
+    buildCommand: chmod +x build.sh && ./build.sh
+    startCommand: gunicorn run:app
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: PINECONE_API_KEY
+        sync: false
+      - key: CLAUDE_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: UNSC_INDEX_NAME
+        sync: false
+      - key: PINECONE_ENVIRONMENT
+        sync: false
+      - key: MEETING_TRANSCRIPTS_INDEX
+        sync: false
+      - key: PINECONE_HOST
+        sync: false
+      - key: SMTP_HOST
+        value: smtp.protonmail.ch
+      - key: SMTP_PORT
+        value: 587
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: SMTP_FROM
+        sync: false
+      - key: SMTP_USE_TLS
+        value: true
+      - key: PASSWORD_RESET_URL_BASE
+        sync: false
+    healthCheckPath: /auth/signin
+    autoDeploy: true
+    pullRequestPreviewsEnabled: true
+    disk:
+      name: lifelines-data
+      mountPath: /opt/render/project/src/temp
+      sizeGB: 1
+
+databases:
+  - name: lifelines-db
+    databaseName: lifelines
+    user: lifelines_user
+    plan: starter

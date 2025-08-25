@@ -8,7 +8,6 @@ numpy
 PyMuPDF
 langchain
 langchain-community
-langchain-ollama
 langchain_openai
 lark
 groq
@@ -19,4 +18,5 @@ openai
 openai-whisper
 langchain_experimental
 yt-dlp
+ffmpeg-python
 gunicorn
