@@ -3,7 +3,7 @@ services:
     name: lifelines-backend
     env: python
     plan: starter
-    buildCommand: chmod +x build.sh && ./build.sh
+    buildCommand: pip install -r requirements.txt
     startCommand: gunicorn run:app
     envVars:
       - key: PYTHON_VERSION
