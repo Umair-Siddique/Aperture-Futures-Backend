@@ -39,95 +39,95 @@ def sanitize_id(name: str) -> str:
     return sanitized.lower()
 
 
-@transcribe_bp.route("/audio", methods=["POST"])
-@token_required
-def transcribe_and_store(user):  
-    title = request.form.get("title")
-    description = request.form.get("description")
-    members_raw = request.form.get("members")  # comma-separated list from client
-    audio_file = request.files.get("audio")
+# @transcribe_bp.route("/audio", methods=["POST"])
+# @token_required
+# def transcribe_and_store(user):  
+#     title = request.form.get("title")
+#     description = request.form.get("description")
+#     members_raw = request.form.get("members")  # comma-separated list from client
+#     audio_file = request.files.get("audio")
 
-    # --- Validation ---
-    if not title or not audio_file or not description or not members_raw:
-        return jsonify({"error": "title, description, members, and audio file required"}), 400
+#     # --- Validation ---
+#     if not title or not audio_file or not description or not members_raw:
+#         return jsonify({"error": "title, description, members, and audio file required"}), 400
 
-    # Parse members into a Python list (for Supabase text[])
-    members_list = [m.strip() for m in members_raw.split(",") if m.strip()]
-    if not members_list:
-        return jsonify({"error": "members cannot be empty"}), 400
+#     # Parse members into a Python list (for Supabase text[])
+#     members_list = [m.strip() for m in members_raw.split(",") if m.strip()]
+#     if not members_list:
+#         return jsonify({"error": "members cannot be empty"}), 400
 
-    # Check for duplicate title
-    response = current_app.supabase.table('audio_files').select('title').eq('title', title).execute()
-    if response.data:
-        return jsonify({"error": f"title '{title}' already exists"}), 409
+#     # Check for duplicate title
+#     response = current_app.supabase.table('audio_files').select('title').eq('title', title).execute()
+#     if response.data:
+#         return jsonify({"error": f"title '{title}' already exists"}), 409
 
-    # Save audio file temporarily
-    filename = f"{uuid.uuid4().hex}_{secure_filename(audio_file.filename)}"
-    temp_dir = tempfile.gettempdir()
-    filepath = os.path.join(temp_dir, filename)
-    audio_file.save(filepath)
+#     # Save audio file temporarily
+#     filename = f"{uuid.uuid4().hex}_{secure_filename(audio_file.filename)}"
+#     temp_dir = tempfile.gettempdir()
+#     filepath = os.path.join(temp_dir, filename)
+#     audio_file.save(filepath)
 
-    timestamp = int(time.time())
+#     timestamp = int(time.time())
 
-    # Store metadata in Supabase
-    current_app.supabase.table('audio_files').insert({
-        "title": title,
-        "description": description,
-        "members": members_list,
-        "timestamp": timestamp
-    }).execute()
+#     # Store metadata in Supabase
+#     current_app.supabase.table('audio_files').insert({
+#         "title": title,
+#         "description": description,
+#         "members": members_list,
+#         "timestamp": timestamp
+#     }).execute()
 
-    # Transcribe with OpenAI Whisper API instead of local model
-    transcript = transcribe_audio_with_openai(filepath)
+#     # Transcribe with OpenAI Whisper API instead of local model
+#     transcript = transcribe_audio_with_openai(filepath)
 
-    if not transcript:
-        os.remove(filepath)
-        return jsonify({"error": "Transcription failed"}), 500
+#     if not transcript:
+#         os.remove(filepath)
+#         return jsonify({"error": "Transcription failed"}), 500
 
-    # >>> NEW: generate and store transcription report
-    report_info = {}
-    try:
-        report_info = generate_and_store_transcription_report(title=title, transcript=transcript)
-    except Exception as e:
-        current_app.logger.error("Report generation failed: %s", e)
+#     # >>> NEW: generate and store transcription report
+#     report_info = {}
+#     try:
+#         report_info = generate_and_store_transcription_report(title=title, transcript=transcript)
+#     except Exception as e:
+#         current_app.logger.error("Report generation failed: %s", e)
 
-    # Split transcript into chunks
-    chunks = preprocess_and_chunk(transcript)
+#     # Split transcript into chunks
+#     chunks = preprocess_and_chunk(transcript)
 
-    # Safe namespace for Pinecone
-    safe_namespace = sanitize_id(title)
+#     # Safe namespace for Pinecone
+#     safe_namespace = sanitize_id(title)
 
-    # Embed + upsert into Pinecone
-    def batch_embed_and_upsert(chunks, batch_size=16):
-        total_chunks = len(chunks)
-        vectors = []
-        for i in range(0, total_chunks, batch_size):
-            batch_chunks = chunks[i:i+batch_size]
-            batch_embeds = current_app.embeddings.embed_documents(batch_chunks)
-            vectors.extend([
-                (
-                    f"{safe_namespace}_{i+j}",
-                    vec,
-                    {"text": chunk}
-                )
-                for j, (vec, chunk) in enumerate(zip(batch_embeds, batch_chunks))
-            ])
-        current_app.pinecone_index.upsert(vectors=vectors, namespace=safe_namespace)
-        return len(vectors)
+#     # Embed + upsert into Pinecone
+#     def batch_embed_and_upsert(chunks, batch_size=16):
+#         total_chunks = len(chunks)
+#         vectors = []
+#         for i in range(0, total_chunks, batch_size):
+#             batch_chunks = chunks[i:i+batch_size]
+#             batch_embeds = current_app.embeddings.embed_documents(batch_chunks)
+#             vectors.extend([
+#                 (
+#                     f"{safe_namespace}_{i+j}",
+#                     vec,
+#                     {"text": chunk}
+#                 )
+#                 for j, (vec, chunk) in enumerate(zip(batch_embeds, batch_chunks))
+#             ])
+#         current_app.pinecone_index.upsert(vectors=vectors, namespace=safe_namespace)
+#         return len(vectors)
 
-    chunks_stored = batch_embed_and_upsert(chunks, batch_size=16)
+#     chunks_stored = batch_embed_and_upsert(chunks, batch_size=16)
 
-    # Cleanup temp file
-    os.remove(filepath)
+#     # Cleanup temp file
+#     os.remove(filepath)
 
-    return jsonify({
-        "title": title,
-        "description": description,
-        "members": members_list,
-        "timestamp": timestamp,
-        "chunks_stored": chunks_stored,
-        "report_saved": bool(report_info.get("ok"))
-    }), 200
+#     return jsonify({
+#         "title": title,
+#         "description": description,
+#         "members": members_list,
+#         "timestamp": timestamp,
+#         "chunks_stored": chunks_stored,
+#         "report_saved": bool(report_info.get("ok"))
+#     }), 200
 
 
 
@@ -391,97 +391,97 @@ def transcribe_audio_with_openai(audio_path: str):
 
 
 
-@transcribe_bp.route("/video", methods=["POST"])
-@token_required
-def transcribe_video_and_store(user):
-    title = request.form.get("title")
-    description = request.form.get("description")
-    video_url = request.form.get("url") or request.form.get("video_url")
-    members_raw = request.form.get("members")
+# @transcribe_bp.route("/video", methods=["POST"])
+# @token_required
+# def transcribe_video_and_store(user):
+#     title = request.form.get("title")
+#     description = request.form.get("description")
+#     video_url = request.form.get("url") or request.form.get("video_url")
+#     members_raw = request.form.get("members")
 
-    if not title or not description or not video_url or not members_raw:
-        return jsonify({"error": "title, description, url, and members are required"}), 400
+#     if not title or not description or not video_url or not members_raw:
+#         return jsonify({"error": "title, description, url, and members are required"}), 400
 
-    members_list = [m.strip() for m in members_raw.split(",") if m.strip()]
-    if not members_list:
-        return jsonify({"error": "members cannot be empty"}), 400
+#     members_list = [m.strip() for m in members_raw.split(",") if m.strip()]
+#     if not members_list:
+#         return jsonify({"error": "members cannot be empty"}), 400
 
-    parsed = urlparse(video_url)
-    if not (parsed.scheme and parsed.netloc):
-        return jsonify({"error": "Invalid URL"}), 400
+#     parsed = urlparse(video_url)
+#     if not (parsed.scheme and parsed.netloc):
+#         return jsonify({"error": "Invalid URL"}), 400
 
-    exists = current_app.supabase.table("audio_files").select("title").eq("title", title).execute()
-    if exists.data:
-        return jsonify({"error": f"title '{title}' already exists"}), 409
+#     exists = current_app.supabase.table("audio_files").select("title").eq("title", title).execute()
+#     if exists.data:
+#         return jsonify({"error": f"title '{title}' already exists"}), 409
 
-    now_epoch = int(time.time())
+#     now_epoch = int(time.time())
 
-    try:
-        current_app.supabase.table("audio_files").insert({
-            "title": title,
-            "description": description,
-            "members": members_list,
-            "timestamp": now_epoch,
-        }).execute()
-    except Exception as e:
-        current_app.logger.error("Supabase insert error: %s", e)
-        return jsonify({"error": "Failed to insert record"}), 500
+#     try:
+#         current_app.supabase.table("audio_files").insert({
+#             "title": title,
+#             "description": description,
+#             "members": members_list,
+#             "timestamp": now_epoch,
+#         }).execute()
+#     except Exception as e:
+#         current_app.logger.error("Supabase insert error: %s", e)
+#         return jsonify({"error": "Failed to insert record"}), 500
 
-    tmp_mp3 = None
-    try:
-        audio_path, inferred_title = download_audio(video_url)
-        if not audio_path:
-            return jsonify({"error": "Audio download failed"}), 500
+#     tmp_mp3 = None
+#     try:
+#         audio_path, inferred_title = download_audio(video_url)
+#         if not audio_path:
+#             return jsonify({"error": "Audio download failed"}), 500
 
-        tmp_mp3 = convert_and_compress_audio(audio_path)
-        if not tmp_mp3:
-            return jsonify({"error": "Audio conversion/compression failed"}), 500
+#         tmp_mp3 = convert_and_compress_audio(audio_path)
+#         if not tmp_mp3:
+#             return jsonify({"error": "Audio conversion/compression failed"}), 500
 
-        transcript = transcribe_audio_with_openai(tmp_mp3)
-        if not transcript:
-            return jsonify({"error": "Transcription failed"}), 500
+#         transcript = transcribe_audio_with_openai(tmp_mp3)
+#         if not transcript:
+#             return jsonify({"error": "Transcription failed"}), 500
 
-        # >>> NEW: generate and store transcription report
-        report_info = {}
-        try:
-            report_info = generate_and_store_transcription_report(title=title, transcript=transcript)
-        except Exception as e:
-            current_app.logger.error("Report generation failed: %s", e)
+#         # >>> NEW: generate and store transcription report
+#         report_info = {}
+#         try:
+#             report_info = generate_and_store_transcription_report(title=title, transcript=transcript)
+#         except Exception as e:
+#             current_app.logger.error("Report generation failed: %s", e)
 
-        chunks = preprocess_and_chunk(transcript)
+#         chunks = preprocess_and_chunk(transcript)
 
-        def batch_embed_and_upsert(chunks_list, batch_size=16):
-            safe_namespace = sanitize_id(title)
-            total = 0
-            for i in range(0, len(chunks_list), batch_size):
-                batch_chunks = chunks_list[i:i + batch_size]
-                batch_embeds = current_app.embeddings.embed_documents(batch_chunks)
-                vectors = []
-                for j, (vec, chunk) in enumerate(zip(batch_embeds, batch_chunks)):
-                    vectors.append((
-                        f"{safe_namespace}_{i + j}",
-                        vec,
-                        {"text": chunk},
-                    ))
-                current_app.pinecone_index.upsert(vectors=vectors, namespace=safe_namespace)
-                total += len(vectors)
-            return total
+#         def batch_embed_and_upsert(chunks_list, batch_size=16):
+#             safe_namespace = sanitize_id(title)
+#             total = 0
+#             for i in range(0, len(chunks_list), batch_size):
+#                 batch_chunks = chunks_list[i:i + batch_size]
+#                 batch_embeds = current_app.embeddings.embed_documents(batch_chunks)
+#                 vectors = []
+#                 for j, (vec, chunk) in enumerate(zip(batch_embeds, batch_chunks)):
+#                     vectors.append((
+#                         f"{safe_namespace}_{i + j}",
+#                         vec,
+#                         {"text": chunk},
+#                     ))
+#                 current_app.pinecone_index.upsert(vectors=vectors, namespace=safe_namespace)
+#                 total += len(vectors)
+#             return total
 
-        chunks_stored = batch_embed_and_upsert(chunks, batch_size=16)
+#         chunks_stored = batch_embed_and_upsert(chunks, batch_size=16)
 
-        return jsonify({
-            "title": title,
-            "description": description,
-            "members": members_list,
-            "url": video_url,
-            "timestamp": now_epoch,
-            "chunks_stored": chunks_stored,
-            "report_saved": bool(report_info.get("ok"))
-        }), 200
+#         return jsonify({
+#             "title": title,
+#             "description": description,
+#             "members": members_list,
+#             "url": video_url,
+#             "timestamp": now_epoch,
+#             "chunks_stored": chunks_stored,
+#             "report_saved": bool(report_info.get("ok"))
+#         }), 200
 
-    finally:
-        try:
-            if tmp_mp3 and os.path.exists(tmp_mp3):
-                os.remove(tmp_mp3)
-        except Exception:
-            pass
+#     finally:
+#         try:
+#             if tmp_mp3 and os.path.exists(tmp_mp3):
+#                 os.remove(tmp_mp3)
+#         except Exception:
+#             pass
