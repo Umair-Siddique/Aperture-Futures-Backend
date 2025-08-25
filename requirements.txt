@@ -19,3 +19,4 @@ openai
 openai-whisper
 langchain_experimental
 yt-dlp
+gunicorn

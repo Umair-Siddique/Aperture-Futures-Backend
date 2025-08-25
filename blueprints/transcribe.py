@@ -18,6 +18,7 @@ from config import Config
 from langchain_openai import ChatOpenAI
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from .auth import token_required
+from report.generate_report import generate_and_store_transcription_report
 
 transcribe_bp = Blueprint('transcribe', __name__)
 client = OpenAI(api_key=Config.OPENAI_API_KEY)
@@ -30,10 +31,6 @@ def preprocess_and_chunk(text):
         separators=["\n\n", "\n", ".", " ", ""]
     )
     return text_splitter.split_text(text)
-
-# --- TRANSCRIBE AND STORE ENDPOINT ---
-import re
-import unicodedata
 
 def sanitize_id(name: str) -> str:
     """Sanitize string for Pinecone namespace/vector IDs (ASCII only)."""
@@ -72,11 +69,11 @@ def transcribe_and_store(user):
 
     timestamp = int(time.time())
 
-    # Store metadata in Supabase (includes description + members, NOT transcript)
+    # Store metadata in Supabase
     current_app.supabase.table('audio_files').insert({
         "title": title,
         "description": description,
-        "members": members_list,   # Supabase maps this to text[]
+        "members": members_list,
         "timestamp": timestamp
     }).execute()
 
@@ -88,6 +85,13 @@ def transcribe_and_store(user):
     if not transcript:
         os.remove(filepath)
         return jsonify({"error": "Transcription failed"}), 500
+
+    # >>> NEW: generate and store transcription report
+    report_info = {}
+    try:
+        report_info = generate_and_store_transcription_report(title=title, transcript=transcript)
+    except Exception as e:
+        current_app.logger.error("Report generation failed: %s", e)
 
     # Split transcript into chunks
     chunks = preprocess_and_chunk(transcript)
@@ -104,9 +108,9 @@ def transcribe_and_store(user):
             batch_embeds = current_app.embeddings.embed_documents(batch_chunks)
             vectors.extend([
                 (
-                    f"{safe_namespace}_{i+j}",  # safe vector ID
+                    f"{safe_namespace}_{i+j}",
                     vec,
-                    {"text": chunk}             # ONLY transcript text stored
+                    {"text": chunk}
                 )
                 for j, (vec, chunk) in enumerate(zip(batch_embeds, batch_chunks))
             ])
@@ -123,8 +127,10 @@ def transcribe_and_store(user):
         "description": description,
         "members": members_list,
         "timestamp": timestamp,
-        "chunks_stored": chunks_stored
-    })
+        "chunks_stored": chunks_stored,
+        "report_saved": bool(report_info.get("ok"))
+    }), 200
+
 
 
 
@@ -437,6 +443,13 @@ def transcribe_video_and_store(user):
         if not transcript:
             return jsonify({"error": "Transcription failed"}), 500
 
+        # >>> NEW: generate and store transcription report
+        report_info = {}
+        try:
+            report_info = generate_and_store_transcription_report(title=title, transcript=transcript)
+        except Exception as e:
+            current_app.logger.error("Report generation failed: %s", e)
+
         chunks = preprocess_and_chunk(transcript)
 
         def batch_embed_and_upsert(chunks_list, batch_size=16):
@@ -465,6 +478,7 @@ def transcribe_video_and_store(user):
             "url": video_url,
             "timestamp": now_epoch,
             "chunks_stored": chunks_stored,
+            "report_saved": bool(report_info.get("ok"))
         }), 200
 
     finally:
