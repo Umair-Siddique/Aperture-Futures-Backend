@@ -17,5 +17,5 @@ pinecone
 openai
 openai-whisper
 langchain_experimental
-# yt-dlp
+yt-dlp
 gunicorn
