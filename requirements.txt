@@ -1,7 +1,6 @@
 python-dotenv
 flask
 supabase
-
 anthropic
 faiss-cpu
 numpy
@@ -19,3 +18,4 @@ openai-whisper
 langchain_experimental
 yt-dlp
 gunicorn
+requests
