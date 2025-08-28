@@ -289,17 +289,25 @@ def create_message(user, conversation_id):
         return jsonify({"error": "Failed to create message"}), 500
 
 # --- GET MESSAGES FOR CONVERSATION ENDPOINT ---
-@conversations_bp.route("/<conversation_id>/messages", methods=["GET"])
+
+# --- GET CONVERSATION MESSAGE PAIRS ENDPOINT ---
+@conversations_bp.route("/<conversation_id>/message", methods=["GET"])
 @token_required
-def get_messages(user, conversation_id):
+def get_message_pairs(user, conversation_id):
     """
-    Get paginated messages for a specific conversation.
+    Get paginated message pairs (user question + AI response) for a specific conversation.
     Query params:
       - page: 1-based page number (default 1)
-      - limit: items per page (default 10, max 50)
+      - limit: pairs per page (default 10, max 25)
     Response:
       {
-        "items": [{"id": "...", "role": "...", "content": "...", "created_at": "..."}, ...],
+        "items": [
+          {
+            "user_message": {"id": "...", "content": "...", "created_at": "..."},
+            "ai_message": {"id": "...", "content": "...", "created_at": "..."}
+          },
+          ...
+        ],
         "page": 1,
         "limit": 10,
         "total": 42,
@@ -341,10 +349,12 @@ def get_messages(user, conversation_id):
         
         # Clamp values
         page = max(page, 1)
-        limit = max(1, min(limit, 50))  # Limit between 1 and 50
+        limit = max(1, min(limit, 25))  # Limit between 1 and 25 pairs
         
-        start = (page - 1) * limit
-        end = start + limit - 1  # inclusive end for Supabase .range()
+        # Calculate offset for pairs (each pair = 2 messages)
+        pairs_offset = (page - 1) * limit
+        messages_offset = pairs_offset * 2
+        messages_limit = limit * 2
         
         # Get messages for the conversation (ordered by creation time)
         response = (
@@ -353,24 +363,51 @@ def get_messages(user, conversation_id):
                 .select("id, role, content, created_at, updated_at", count="exact")
                 .eq("conversation_id", conversation_id)
                 .order("created_at", desc=False)  # Oldest first (chronological order)
-                .range(start, end)
+                .range(messages_offset, messages_offset + messages_limit - 1)
                 .execute()
         )
         
-        items = response.data or []
-        total = response.count or 0
-        total_pages = ceil(total / limit) if total > 0 else 0
+        messages = response.data or []
+        total_messages = response.count or 0
+        total_pairs = total_messages // 2
+        total_pages = ceil(total_pairs / limit) if total_pairs > 0 else 0
+        
+        # Group messages into pairs
+        message_pairs = []
+        i = 0
+        while i < len(messages) - 1:
+            user_msg = messages[i]
+            ai_msg = messages[i + 1]
+            
+            # Verify we have a valid user-assistant pair
+            if user_msg["role"] == "user" and ai_msg["role"] == "assistant":
+                message_pairs.append({
+                    "user_message": {
+                        "id": user_msg["id"],
+                        "content": user_msg["content"],
+                        "created_at": user_msg["created_at"]
+                    },
+                    "ai_message": {
+                        "id": ai_msg["id"],
+                        "content": ai_msg["content"],
+                        "created_at": ai_msg["created_at"]
+                    }
+                })
+                i += 2  # Skip to next pair
+            else:
+                # If not a valid pair, skip the first message and try again
+                i += 1
         
         return jsonify({
-            "items": items,
+            "items": message_pairs,
             "page": page,
             "limit": limit,
-            "total": total,
+            "total": total_pairs,
             "total_pages": total_pages,
             "has_next": page < total_pages,
             "has_prev": page > 1
         }), 200
         
     except Exception as e:
-        current_app.logger.error(f"Error getting messages: {e}")
-        return jsonify({"error": "Failed to get messages"}), 500
+        current_app.logger.error(f"Error getting message pairs: {e}")
+        return jsonify({"error": "Failed to get message pairs"}), 500
