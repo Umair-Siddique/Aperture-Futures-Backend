@@ -17,7 +17,8 @@ from openai import OpenAI
 from config import Config
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from .auth import token_required
-from pydub import AudioSegment
+import librosa
+import soundfile as sf
 import imageio_ffmpeg
 from report.generate_report import generate_and_store_transcription_report
 
@@ -27,34 +28,50 @@ client = OpenAI(api_key=Config.OPENAI_API_KEY)
 
 MAX_FILE_SIZE = 25 * 1024 * 1024  # 25 MB in bytes
 
-AudioSegment.converter = imageio_ffmpeg.get_ffmpeg_exe()
+# Remove the AudioSegment.converter line since we're not using pydub anymore
 
 
 def split_audio_into_chunks(input_path: str, max_size=MAX_FILE_SIZE):
-    """Split audio into chunks each ≤ max_size bytes."""
-    audio = AudioSegment.from_file(input_path)
-    duration_ms = len(audio)
+    """Split audio into chunks each ≤ max_size bytes using librosa."""
+    try:
+        # Load audio with librosa
+        audio, sr = librosa.load(input_path, sr=None)
+        duration_samples = len(audio)
+        duration_seconds = duration_samples / sr
 
-    chunks = []
-    start = 0
-    while start < duration_ms:
-        # progressively increase until size is too large
-        end = duration_ms
-        step = 60 * 1000  # start with 1 min increments
-        while True:
-            candidate = audio[start:end]
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmpf:
-                candidate.export(tmpf.name, format="mp3")
+        chunks = []
+        start_sample = 0
+        
+        while start_sample < duration_samples:
+            # Start with 1 minute chunks
+            chunk_duration_seconds = 60
+            end_sample = min(start_sample + int(chunk_duration_seconds * sr), duration_samples)
+            
+            # Extract chunk
+            chunk_audio = audio[start_sample:end_sample]
+            
+            # Save chunk to temporary file
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmpf:
+                sf.write(tmpf.name, chunk_audio, sr)
                 size = os.path.getsize(tmpf.name)
-            if size <= max_size or end - start <= step:
+                
+                # If chunk is too large, reduce duration progressively
+                while size > max_size and chunk_duration_seconds > 10:
+                    chunk_duration_seconds -= 10
+                    end_sample = start_sample + int(chunk_duration_seconds * sr)
+                    chunk_audio = audio[start_sample:end_sample]
+                    
+                    # Rewrite with smaller chunk
+                    sf.write(tmpf.name, chunk_audio, sr)
+                    size = os.path.getsize(tmpf.name)
+                
                 chunks.append(tmpf.name)
-                start = end
-                break
-            else:
-                # shrink by 1 minute
-                end -= step
+                start_sample = end_sample
 
-    return chunks
+        return chunks
+    except Exception as e:
+        current_app.logger.error(f"Error splitting audio with librosa: {str(e)}")
+        return []
 
 
 def transcribe_audio_with_openai(audio_path: str):
