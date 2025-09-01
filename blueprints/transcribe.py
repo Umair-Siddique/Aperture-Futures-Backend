@@ -17,10 +17,67 @@ from openai import OpenAI
 from config import Config
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from .auth import token_required
+from pydub import AudioSegment
+import imageio_ffmpeg
 from report.generate_report import generate_and_store_transcription_report
 
 transcribe_bp = Blueprint('transcribe', __name__)
 client = OpenAI(api_key=Config.OPENAI_API_KEY)
+
+
+MAX_FILE_SIZE = 25 * 1024 * 1024  # 25 MB in bytes
+
+AudioSegment.converter = imageio_ffmpeg.get_ffmpeg_exe()
+
+
+def split_audio_into_chunks(input_path: str, max_size=MAX_FILE_SIZE):
+    """Split audio into chunks each ≤ max_size bytes."""
+    audio = AudioSegment.from_file(input_path)
+    duration_ms = len(audio)
+
+    chunks = []
+    start = 0
+    while start < duration_ms:
+        # progressively increase until size is too large
+        end = duration_ms
+        step = 60 * 1000  # start with 1 min increments
+        while True:
+            candidate = audio[start:end]
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmpf:
+                candidate.export(tmpf.name, format="mp3")
+                size = os.path.getsize(tmpf.name)
+            if size <= max_size or end - start <= step:
+                chunks.append(tmpf.name)
+                start = end
+                break
+            else:
+                # shrink by 1 minute
+                end -= step
+
+    return chunks
+
+
+def transcribe_audio_with_openai(audio_path: str):
+    """Send audio to OpenAI Whisper for transcription."""
+    with open(audio_path, "rb") as f:
+        transcript = client.audio.transcriptions.create(
+            model="gpt-4o-mini-transcribe",
+            file=f
+        )
+    return transcript.text if transcript else ""
+
+
+def transcribe_large_audio(audio_path: str):
+    """Split large audio into chunks and transcribe each with Whisper."""
+    all_chunks = split_audio_into_chunks(audio_path, MAX_FILE_SIZE)
+    transcripts = []
+    for chunk_path in all_chunks:
+        text = transcribe_audio_with_openai(chunk_path)
+        if text:
+            transcripts.append(text)
+        os.remove(chunk_path)  # cleanup each chunk
+    return " ".join(transcripts)
+
 
 # Helper: Chunk Text Using RecursiveCharacterTextSplitter
 def preprocess_and_chunk(text):
@@ -31,6 +88,7 @@ def preprocess_and_chunk(text):
     )
     return text_splitter.split_text(text)
 
+
 def sanitize_id(name: str) -> str:
     """Sanitize string for Pinecone namespace/vector IDs (ASCII only)."""
     normalized = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
@@ -38,37 +96,48 @@ def sanitize_id(name: str) -> str:
     return sanitized.lower()
 
 
+def batch_embed_and_upsert(chunks, safe_namespace, batch_size=16):
+    """Embed transcript chunks and upsert them into Pinecone."""
+    total_chunks = len(chunks)
+    vectors = []
+    for i in range(0, total_chunks, batch_size):
+        batch_chunks = chunks[i:i+batch_size]
+        batch_embeds = current_app.embeddings.embed_documents(batch_chunks)
+        vectors.extend([
+            (
+                f"{safe_namespace}_{i+j}",
+                vec,
+                {"text": chunk}
+            )
+            for j, (vec, chunk) in enumerate(zip(batch_embeds, batch_chunks))
+        ])
+    current_app.pinecone_index.upsert(vectors=vectors, namespace=safe_namespace)
+    return len(vectors)
+
+
 @transcribe_bp.route("/audio", methods=["POST"])
 @token_required
-def transcribe_and_store(user):  
+def transcribe_and_store(user):
     title = request.form.get("title")
     description = request.form.get("description")
-    members_raw = request.form.get("members")  # comma-separated list from client
+    members_raw = request.form.get("members")
     audio_file = request.files.get("audio")
 
-    # --- Validation ---
     if not title or not audio_file or not description or not members_raw:
         return jsonify({"error": "title, description, members, and audio file required"}), 400
 
-    # Parse members into a Python list (for Supabase text[])
     members_list = [m.strip() for m in members_raw.split(",") if m.strip()]
     if not members_list:
         return jsonify({"error": "members cannot be empty"}), 400
 
-    # Check for duplicate title
-    response = current_app.supabase.table('audio_files').select('title').eq('title', title).execute()
-    if response.data:
-        return jsonify({"error": f"title '{title}' already exists"}), 409
-
-    # Save audio file temporarily
+    # Save uploaded file temporarily
     filename = f"{uuid.uuid4().hex}_{secure_filename(audio_file.filename)}"
     temp_dir = tempfile.gettempdir()
     filepath = os.path.join(temp_dir, filename)
     audio_file.save(filepath)
 
+    # Insert metadata into Supabase
     timestamp = int(time.time())
-
-    # Store metadata in Supabase
     current_app.supabase.table('audio_files').insert({
         "title": title,
         "description": description,
@@ -76,48 +145,25 @@ def transcribe_and_store(user):
         "timestamp": timestamp
     }).execute()
 
-    # Transcribe with OpenAI Whisper API instead of local model
-    transcript = transcribe_audio_with_openai(filepath)
+    # Transcribe large file safely
+    transcript = transcribe_large_audio(filepath)
+
+    os.remove(filepath)  # cleanup uploaded file
 
     if not transcript:
-        os.remove(filepath)
         return jsonify({"error": "Transcription failed"}), 500
 
-    # >>> NEW: generate and store transcription report
+    # Report generation
     report_info = {}
     try:
         report_info = generate_and_store_transcription_report(title=title, transcript=transcript)
     except Exception as e:
         current_app.logger.error("Report generation failed: %s", e)
 
-    # Split transcript into chunks
+    # Chunk transcript → embeddings
     chunks = preprocess_and_chunk(transcript)
-
-    # Safe namespace for Pinecone
     safe_namespace = sanitize_id(title)
-
-    # Embed + upsert into Pinecone
-    def batch_embed_and_upsert(chunks, batch_size=16):
-        total_chunks = len(chunks)
-        vectors = []
-        for i in range(0, total_chunks, batch_size):
-            batch_chunks = chunks[i:i+batch_size]
-            batch_embeds = current_app.embeddings.embed_documents(batch_chunks)
-            vectors.extend([
-                (
-                    f"{safe_namespace}_{i+j}",
-                    vec,
-                    {"text": chunk}
-                )
-                for j, (vec, chunk) in enumerate(zip(batch_embeds, batch_chunks))
-            ])
-        current_app.pinecone_index.upsert(vectors=vectors, namespace=safe_namespace)
-        return len(vectors)
-
-    chunks_stored = batch_embed_and_upsert(chunks, batch_size=16)
-
-    # Cleanup temp file
-    os.remove(filepath)
+    chunks_stored = batch_embed_and_upsert(chunks, safe_namespace, batch_size=16)
 
     return jsonify({
         "title": title,
@@ -127,10 +173,6 @@ def transcribe_and_store(user):
         "chunks_stored": chunks_stored,
         "report_saved": bool(report_info.get("ok"))
     }), 200
-
-
-
-
 
 @transcribe_bp.route("/list-transcription", methods=["GET"])
 @token_required
@@ -233,7 +275,7 @@ def delete_transcription(user):
 
 
 
-# # -------------------- /video Endpoint --------------------
+# -------------------- /video Endpoint --------------------
 def find_stream_url_from_un(page_url: str):
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
@@ -278,7 +320,7 @@ def download_audio(url: str):
         "nocheckcertificate": True,
         "quiet": True,
         "outtmpl": outtmpl,
-        "downloader": "ffmpeg",
+        # ✅ no need to set "downloader": "ffmpeg" explicitly
         "hls_use_mpegts": True,
     }
 
@@ -290,15 +332,16 @@ def download_audio(url: str):
     except Exception:
         return None, None
 
+
 def convert_and_compress_audio(input_audio_path: str):
-    """Convert to small MP3 for cheaper/faster transcription."""
+    """Convert to small MP3 for cheaper/faster transcription using imageio-ffmpeg."""
     if not input_audio_path or not os.path.exists(input_audio_path):
         return None
     output_audio_path = os.path.splitext(input_audio_path)[0] + ".mp3"
     try:
         subprocess.run(
             [
-                "ffmpeg",
+                imageio_ffmpeg.get_ffmpeg_exe(),  # ✅ use bundled ffmpeg
                 "-y",
                 "-i", input_audio_path,
                 "-acodec", "libmp3lame",
@@ -319,6 +362,7 @@ def convert_and_compress_audio(input_audio_path: str):
         return None
     except subprocess.CalledProcessError:
         return None
+    
 
 def transcribe_audio_with_openai(audio_path: str):
     """Transcribe with OpenAI Whisper-1."""
@@ -383,11 +427,12 @@ def transcribe_video_and_store(user):
         if not tmp_mp3:
             return jsonify({"error": "Audio conversion/compression failed"}), 500
 
-        transcript = transcribe_audio_with_openai(tmp_mp3)
+        # ✅ Batch transcription
+        transcript = transcribe_large_audio(tmp_mp3)
         if not transcript:
             return jsonify({"error": "Transcription failed"}), 500
 
-        # >>> NEW: generate and store transcription report
+        # Report generation
         report_info = {}
         try:
             report_info = generate_and_store_transcription_report(title=title, transcript=transcript)

@@ -19,3 +19,5 @@ langchain_experimental
 yt-dlp
 gunicorn
 requests
+google-genai
+imageio-ffmpeg

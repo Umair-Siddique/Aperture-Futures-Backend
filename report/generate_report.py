@@ -73,7 +73,7 @@ def generate_and_store_transcription_report(title: str, transcript: str) -> dict
     llm = ChatOpenAI(
         openai_api_key=Config.OPENAI_API_KEY,
         model_name=getattr(Config, "TRANSCRIPTION_REPORT_MODEL", "gpt-4o-mini"),
-        temperature=0.2,
+        model='gpt-5'
     )
 
     resp = llm.invoke([

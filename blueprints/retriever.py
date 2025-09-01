@@ -62,7 +62,52 @@ def retrieve_transcript(user):
     else:
         members = raw_members or []
 
-    # ---- (C) Retrieve context from Pinecone ----
+    # ---- (C) Fetch last 4-5 conversation messages for context ----
+    try:
+        conversation_messages = (
+            current_app.supabase
+            .table('lifelines_messages')
+            .select('role, content')
+            .eq('conversation_id', conversation_id)
+            .order('created_at', desc=False)  # Oldest first
+            .limit(10)  # Get last 10 messages (5 exchanges)
+            .execute()
+        )
+        
+        # Build conversation context from last 4-5 exchanges
+        conversation_context = ""
+        if conversation_messages.data:
+            # Take the last 8-10 messages (4-5 exchanges)
+            recent_messages = conversation_messages.data[-8:] if len(conversation_messages.data) > 8 else conversation_messages.data
+            
+            print(f"\n=== CONVERSATION CONTEXT FOR CONVERSATION ID: {conversation_id} ===")
+            print(f"Total messages found: {len(conversation_messages.data)}")
+            print(f"Using recent messages: {len(recent_messages)}")
+            print("--- Recent Messages ---")
+            
+            for i, msg in enumerate(recent_messages):
+                role = msg.get('role', '')
+                content = msg.get('content', '')
+                if role == 'user':
+                    conversation_context += f"User: {content}\n"
+                    print(f"[{i+1}] User: {content[:100]}{'...' if len(content) > 100 else ''}")
+                elif role == 'assistant':
+                    conversation_context += f"Assistant: {content}\n"
+                    print(f"[{i+1}] Assistant: {content[:100]}{'...' if len(content) > 100 else ''}")
+            
+            conversation_context = conversation_context.strip()
+            print(f"--- End Messages ---")
+            print(f"Conversation context length: {len(conversation_context)} characters")
+            print("=" * 60)
+        else:
+            print(f"\n=== NO CONVERSATION HISTORY FOUND FOR ID: {conversation_id} ===")
+            
+    except Exception as e:
+        # If we can't fetch conversation history, continue without it
+        conversation_context = ""
+        print(f"Warning: Could not fetch conversation history: {str(e)}")
+
+    # ---- (D) Retrieve context from Pinecone ----
     try:
         query_embedding = current_app.embeddings.embed_query(query)
     except Exception as e:
@@ -87,23 +132,35 @@ def retrieve_transcript(user):
     ]
     combined_context = "\n".join(c for c in contexts if c).strip()
 
-    # ---- (D) Build RAG prompt ----
+    # ---- (E) Build RAG prompt with conversation context ----
     system_prompt = (
         "You are a helpful assistant for meeting Q&A. "
         "Always respond in **valid GitHub-Flavored Markdown**. "
-        "Use headings, bullet points, numbered lists, and code blocks if useful."
+        "Use headings, bullet points, numbered lists, and code blocks if useful. "
+        "Maintain context from the previous conversation and provide coherent, contextual responses."
     )
+    
     user_prompt = (
         "Using only the following transcript chunks and the provided meeting description, "
-        "answer the user's question in Markdown.\n\n"
+        "answer the user's question in Markdown. Consider the conversation context to provide "
+        "relevant and coherent responses.\n\n"
         f"### Meeting Description\n{description}\n\n"
         f"### Meeting Members\n{', '.join(members)}\n\n"
         f"### Transcript Chunks\n{combined_context if combined_context else '[no transcript context found]'}\n\n"
-        f"### Question\n{query}\n\n"
-        "### Answer\n"
     )
+    
+    # Add conversation context if available
+    if conversation_context:
+        user_prompt += f"### Recent Conversation Context\n{conversation_context}\n\n"
+        print(f"\n=== PROMPT SENT TO LLM ===")
+        print(f"System prompt length: {len(system_prompt)} characters")
+        print(f"User prompt length: {len(user_prompt)} characters")
+        print(f"Conversation context included: {'Yes' if conversation_context else 'No'}")
+        print("=" * 60)
+    
+    user_prompt += f"### Current Question\n{query}\n\n### Answer\n"
 
-    # ---- (E) Save the user's query as a message (role='user') before streaming ----
+    # ---- (F) Save the user's query as a message (role='user') before streaming ----
     try:
         current_app.supabase.table('lifelines_messages').insert({
             "conversation_id": conversation_id,
@@ -119,7 +176,7 @@ def retrieve_transcript(user):
     except Exception as e:
         return jsonify({"error": f"Failed to persist user query: {str(e)}"}), 500
 
-    # ---- (F) Stream LLM response, buffer it, then save as assistant message ----
+    # ---- (G) Stream LLM response, buffer it, then save as assistant message ----
     def generate_stream_and_persist():
         client = OpenAI(api_key=Config.OPENAI_API_KEY)
         assistant_text = ""

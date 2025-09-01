@@ -15,6 +15,7 @@ class Config:
 		PINECONE_ENV=os.getenv("PINECONE_ENVIRONMENT")
 		MEETING_TRANSCRIPTS_INDEX=os.getenv("MEETING_TRANSCRIPTS_INDEX")
 		PINECONE_HOST=os.getenv('PINECONE_HOST')
+		GEMINI_API_KEY=os.getenv('GEMINI_API_KEY')
 
 		# SMTP / Email settings
 		SMTP_HOST = os.getenv("SMTP_HOST", "smtp.protonmail.ch")
