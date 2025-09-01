@@ -16,7 +16,7 @@ def create_app():
     app = Flask(__name__)
     app.config.from_object(Config)
 
-    CORS(app, supports_credentials=True, origins=['http://localhost:5173','http://bluelines-rag.s3-website.eu-north-1.amazonaws.com'])
+    CORS(app, supports_credentials=True, origins=['http://localhost:5173','https://blue-lines-life-lines-rag.vercel.app'])
 
     # Initialize extensions
     init_supabase(app)
