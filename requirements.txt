@@ -22,3 +22,4 @@ requests
 google-genai
 imageio-ffmpeg
 pydub
+pyaudioop
