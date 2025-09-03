@@ -6,7 +6,9 @@ from langchain_openai import OpenAIEmbeddings
 from pinecone import Pinecone
 
 def init_supabase(app):
-    app.supabase = create_client(Config.SUPABASE_URL, Config.SUPABASE_KEY)
+    # Create two clients: one with anon key for public operations, one with service role for admin
+    app.supabase = create_client(Config.SUPABASE_URL, Config.SUPABASE_ANON_KEY)
+    app.supabase_admin = create_client(Config.SUPABASE_URL, Config.SUPABASE_SERVICE_ROLE_KEY)
 
 def init_groq(app):
     app.groq = Groq(api_key=Config.GROQ_API_KEY)

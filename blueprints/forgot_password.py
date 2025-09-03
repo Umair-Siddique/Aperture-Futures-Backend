@@ -151,78 +151,118 @@ def hash_token(token):
 def get_user_id_by_email(email: str) -> str | None:
     """
     Resolve a Supabase Auth user id by email (case-insensitive).
-    Tries PostgREST on auth.users, then admin.list_users pagination.
-    Requires SERVICE ROLE key for direct auth.users access.
+    Uses admin client which requires SERVICE ROLE key.
     """
     if not email:
         return None
     email_norm = email.strip().lower()
 
-    # --- Fast path A: PostgREST on auth.users (canonical) ---
     try:
-        # supabase-py v2 canonical way to hit a non-public schema:
-        # use the postgrest client, select from auth.users
-        resp = (current_app.supabase
-                .postgrest
-                .schema('auth')
-                .from_('users')
-                .select('id,email')
-                .eq('email', email_norm)
-                .single()
-                .execute())
-        data = getattr(resp, 'data', None)
-        if data and data.get('id'):
-            return data['id']
-    except Exception as e:
-        print(f"[get_user_id_by_email] postgrest.schema('auth').from_('users') failed: {e}")
-
-    # --- Fast path B: Some client versions support schema kw on table() ---
-    try:
-        # Not all supabase-py builds support schema= on table(); safe to try.
-        resp2 = (current_app.supabase
-                 .table('users', schema='auth')
-                 .select('id,email')
-                 .eq('email', email_norm)
-                 .single()
-                 .execute())
-        data2 = getattr(resp2, 'data', None)
-        if data2 and data2.get('id'):
-            return data2['id']
-    except Exception as e:
-        print(f"[get_user_id_by_email] table('users', schema='auth') failed: {e}")
-
-    # --- Fallback: paginate admin.list_users (works everywhere w/ service role) ---
-    try:
-        admin = getattr(current_app.supabase, 'auth', None)
+        # Use supabase_admin client
+        admin = getattr(current_app.supabase_admin, 'auth', None)
         admin = getattr(admin, 'admin', None)
-        if admin is None:
-            print("[get_user_id_by_email] admin client missing")
+        
+        if not admin:
+            print("[get_user_id_by_email] ERROR: admin object not found in auth!")
             return None
 
-        page = 1
-        per_page = 100
-        while True:
-            try:
-                listing = admin.list_users(page=page, per_page=per_page)
-            except TypeError:
-                listing = admin.list_users(page, per_page)  # older signatures
+        print(f"[get_user_id_by_email] Searching for email: {email_norm}")
+        
+        # Get users - handle both list and object responses
+        try:
+            print("[get_user_id_by_email] Calling admin.list_users...")
+            listing = admin.list_users(page=1, per_page=1000)
+            print(f"[get_user_id_by_email] Listing result type: {type(listing)}")
+            
+            # Handle different response formats
+            if isinstance(listing, list):
+                users = listing
+                print(f"[get_user_id_by_email] Direct list response with {len(users)} users")
+            else:
+                # Try to get users from object attributes
+                users = getattr(listing, 'users', None)
+                if users is None:
+                    # Try alternative attribute names
+                    for attr in ['data', 'items', 'results']:
+                        users = getattr(listing, attr, None)
+                        if users is not None:
+                            print(f"[get_user_id_by_email] Found users in attribute: {attr}")
+                            break
+                
+                if users is None:
+                    print(f"[get_user_id_by_email] No users found in listing object: {listing}")
+                    return None
+                    
+            print(f"[get_user_id_by_email] Retrieved {len(users)} users")
+            
+        except Exception as e:
+            print(f"[get_user_id_by_email] Error calling admin.list_users: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
 
-            users = getattr(listing, 'users', None) or []
-            if not users:
-                break
+        if not users:
+            print("[get_user_id_by_email] No users returned from admin.list_users")
+            return None
 
-            for u in users:
-                u_email = getattr(u, 'email', None)
-                if u_email and u_email.strip().lower() == email_norm:
-                    return getattr(u, 'id', None)
+        # Search through the users for matching email
+        for i, user in enumerate(users):
+            user_email = getattr(user, 'email', None)
+            if user_email:
+                user_email_norm = user_email.strip().lower()
+                if user_email_norm == email_norm:
+                    user_id = getattr(user, 'id', None)
+                    if user_id:
+                        print(f"[get_user_id_by_email] Found user {user_id} for email {email_norm}")
+                        return user_id
+                
+                # Debug: print first few emails to see what we're getting
+                if i < 5:  # Only print first 5 for debugging
+                    print(f"[get_user_id_by_email] Sample user {i}: email={user_email}, id={getattr(user, 'id', 'N/A')}")
 
-            if len(users) < per_page:
-                break
-            page += 1
+        # If not found in first 1000, try to get more users
+        if len(users) >= 1000:
+            print("[get_user_id_by_email] More than 1000 users found, checking additional pages...")
+            page = 2
+            while True:
+                try:
+                    listing = admin.list_users(page=page, per_page=1000)
+                    if isinstance(listing, list):
+                        users = listing
+                    else:
+                        users = getattr(listing, 'users', None) or []
+                        
+                    if not users:
+                        break
+                    
+                    print(f"[get_user_id_by_email] Checking page {page}, found {len(users)} users")
+                    
+                    for user in users:
+                        user_email = getattr(user, 'email', None)
+                        if user_email:
+                            user_email_norm = user_email.strip().lower()
+                            if user_email_norm == email_norm:
+                                user_id = getattr(user, 'id', None)
+                                if user_id:
+                                    print(f"[get_user_id_by_email] Found user {user_id} for email {email_norm} on page {page}")
+                                    return user_id
+                    
+                    if len(users) < 1000:
+                        break
+                    page += 1
+                    
+                except Exception as e:
+                    print(f"[get_user_id_by_email] Error getting page {page}: {e}")
+                    break
+
+        print(f"[get_user_id_by_email] No user found for email {email_norm}")
+        return None
+
     except Exception as e:
-        print(f"[get_user_id_by_email] admin.list_users failed: {e}")
-
-    return None
+        print(f"[get_user_id_by_email] Function failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 
 # --- API Endpoints with Enhanced Security ---
@@ -280,9 +320,13 @@ def request_password_reset():
 
         # 6) Build reset URL (prefer configured base if provided)
         # Expect PASSWORD_RESET_URL_BASE like: https://your-frontend/reset-password
-        reset_base = (current_app.config.get('PASSWORD_RESET_URL_BASE') or f"{request.host_url.rstrip('/')}/reset-password")
+        if current_app.debug or "localhost" in request.host:
+            reset_base = "http://localhost:5173/reset-password"
+        else:
+            reset_base = "https://blue-lines-life-lines-rag.vercel.app/reset-password"
         # URL-encode the token so email clients don't mangle it
         encoded_token = quote_plus(token)
+
         reset_url = f"{reset_base}?token={encoded_token}"
 
         # 7) Send email
@@ -317,37 +361,91 @@ def request_password_reset():
         log_attempt(email if 'email' in locals() else 'unknown', client_ip, user_agent, 'request', False)
         return jsonify({'message': 'An error occurred while processing your request'}), 500
 
-
-
 def send_reset_email(to_email, reset_url):
-	# Build HTML template
-	html = f"""
-	<h2>Password Reset</h2>
-	<p>Click the link below to reset your password:</p>
-	<p><a href="{reset_url}">Reset Password</a></p>
-	<p>If you didn’t request this, you can ignore this email.</p>
-	"""
+    # Build HTML template with grey/white theme
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <style>
+            body {{
+                font-family: Arial, sans-serif;
+                background-color: #f5f5f5;
+                margin: 0;
+                padding: 0;
+            }}
+            .container {{
+                max-width: 600px;
+                margin: 40px auto;
+                background-color: #ffffff;
+                border: 1px solid #e0e0e0;
+                border-radius: 8px;
+                padding: 30px;
+                text-align: center;
+                box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+            }}
+            h2 {{
+                color: #333333;
+            }}
+            p {{
+                color: #555555;
+                font-size: 15px;
+                line-height: 1.6;
+            }}
+            .button {{
+                display: inline-block;
+                padding: 12px 24px;
+                margin: 20px 0;
+                font-size: 16px;
+                font-weight: bold;
+                color: #ffffff;
+                background-color: #666666;
+                text-decoration: none;
+                border-radius: 6px;
+            }}
+            .footer {{
+                margin-top: 30px;
+                font-size: 12px;
+                color: #999999;
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h2>Password Reset</h2>
+            <p>You requested to reset your password. Click the button below to continue:</p>
+            <a href="{reset_url}" class="button">Reset Password</a>
+            <p>If you did not request this, you can safely ignore this email.</p>
+            <div class="footer">
+                © {current_app.config.get("APP_NAME", "Your App")} - All rights reserved.
+            </div>
+        </div>
+    </body>
+    </html>
+    """
 
-	msg = MIMEText(html, "html")
-	msg["Subject"] = "Reset your password"
+    msg = MIMEText(html, "html")
+    msg["Subject"] = "Reset your password"
 
-	# Load SMTP config from environment via Flask config
-	smtp_host = current_app.config.get("SMTP_HOST", "smtp.protonmail.ch")
-	smtp_port = int(current_app.config.get("SMTP_PORT", 587))
-	smtp_user = current_app.config.get("SMTP_USER")
-	smtp_password = current_app.config.get("SMTP_PASSWORD")
-	smtp_from = current_app.config.get("SMTP_FROM", smtp_user)
-	smtp_use_tls = bool(current_app.config.get("SMTP_USE_TLS", True))
+    # Load SMTP config from environment via Flask config
+    smtp_host = current_app.config.get("SMTP_HOST", "smtp.protonmail.ch")
+    smtp_port = int(current_app.config.get("SMTP_PORT", 587))
+    smtp_user = current_app.config.get("SMTP_USER")
+    smtp_password = current_app.config.get("SMTP_PASSWORD")
+    smtp_from = current_app.config.get("SMTP_FROM", smtp_user)
+    smtp_use_tls = bool(current_app.config.get("SMTP_USE_TLS", True))
 
-	msg["From"] = smtp_from
-	msg["To"] = to_email
+    msg["From"] = smtp_from
+    msg["To"] = to_email
 
-	with smtplib.SMTP(smtp_host, smtp_port) as server:
-		if smtp_use_tls:
-			server.starttls()
-		if smtp_user and smtp_password:
-			server.login(smtp_user, smtp_password)
-		server.sendmail(msg["From"], [msg["To"]], msg.as_string())
+    with smtplib.SMTP(smtp_host, smtp_port) as server:
+        if smtp_use_tls:
+            server.starttls()
+        if smtp_user and smtp_password:
+            server.login(smtp_user, smtp_password)
+        server.sendmail(msg["From"], [msg["To"]], msg.as_string())
+
 
 @forgot_password_bp.route('/verify-token', methods=['POST'])
 def verify_reset_token():
@@ -461,7 +559,7 @@ def reset_password():
             return jsonify({'message': 'Reset token has expired'}), 400
 
         # ---- 5) Ensure Admin client (SERVICE ROLE) is present ----
-        admin = getattr(current_app.supabase, 'auth', None)
+        admin = getattr(current_app.supabase_admin, 'auth', None)  # Changed from supabase to supabase_admin
         admin = getattr(admin, 'admin', None)
         if admin is None:
             log_attempt(reset_record['email'], client_ip, user_agent, 'reset', False)

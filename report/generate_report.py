@@ -8,50 +8,87 @@ from flask import current_app
 def _build_un_report_prompt(transcript: str) -> str:
     """Return the exact prompt template you provided with the transcript appended."""
     return dedent(f"""
-    You are a UN policy analyst. Convert the following raw UN Security Council transcript into a concise diplomatic report. 
+You are a UN policy analyst. Convert the following raw UN Security Council transcript into a concise diplomatic report.
 
-     *Instructions:* 1. Remove all procedural language (agenda adoption, rule references, etc.).
+### General Formatting & Structure Rules
+- Use *clean Markdown*.
+- No broken words or extra spaces.
+- Neutral, diplomatic tone (“condemned,” “welcomed,” “emphasized,” “reaffirmed”).
+- Bold only for subheadings (e.g., *Concerns Raised*).
+- No procedural details.
 
-    2. Summarize *briefers* (UN officials) in 1–2 paragraphs each, keeping names, roles, and key issues. Include quotes only if striking. 
+---
 
-    3. Summarize *each Member State intervention* in 3–4 sentences. Use neutral, professional diplomatic language (“condemned,” “welcomed,” “emphasized”). Keep only major themes and notable phrases.
+### Council Membership (Hard-Coded)
+- *Permanent Members (P5):*
+  - China
+  - France
+  - Russian Federation
+  - United Kingdom
+  - United States
 
-    4. Organize the Member States into blocs with the following classifications: - *P3: United States, United Kingdom, France - **Russia and China: Russian Federation, China - **A3+: Algeria (on behalf of Algeria, Guyana, Sierra Leone, Somalia) - **E10: All elected members of the Council *not in the A3+ (e.g. Denmark, Panama, Republic of Korea, Slovenia, Greece, Pakistan, etc.) - *Observers/Invited States*: Non-Council participants (e.g. Syria, Iran, Turkey, Tunisia, Norway) 
+- *Elected Members (E10, with terms):*
+  - Algeria (2025)
+  - Denmark (2026)
+  - Greece (2026)
+  - Guyana (2025)
+  - Pakistan (2026)
+  - Panama (2026)
+  - Republic of Korea (2025)
+  - Sierra Leone (2025)
+  - Slovenia (2025)
+  - Somalia (2026)
 
-    5. For each bloc: - Begin with a short *“Shared Themes”* paragraph describing common positions. - Then provide 2–4 sentence *country-specific summaries*. 
+- *Classification Rules:*
+  - These 15 are *Council Members (CM)*.
+  - Non-members speaking under Rule 37 are *Observers/Invited States*.
+  - UN officials, experts, NGOs are *Rule 39 Briefers*.
 
-    6. Structure the final report in this format: ---
-    ### *Summary of Briefings*
-    - [Briefer Name, Role]: [Summary]
-    - [Briefer Name, Role]: [Summary]
+---
 
-    ### *Member States*
-    *P3 (US, UK, France)*
-    - Shared Themes: [summary]
-    - [Country-specific summaries]
+### Presidency Rules
+- The Presidency rotates monthly in English alphabetical order.
+- For *September 2025, the **Republic of Korea* holds the Presidency.
+- The President of the Council:
+  - Chairs the meeting (opens agenda, calls speakers, adjourns).
+  - Also delivers their *national intervention* — always the *last Council Member statement* before Observers/Invited States.
+  - In transcripts, this national intervention may not be introduced with a country name or “I speak in my national capacity.”
+  - When parsing transcripts, assume the *last Council member intervention before the non-members = the President’s national statement*.
 
-    *Russia and China*
-    - Shared Themes: [summary]
-    - [Country-specific summaries]
+---
 
-    *A3+ (Algeria on behalf of Algeria, Guyana, Sierra Leone, Somalia)*
-    - Shared Themes: [summary]
-    - [Country-specific summary]
+### Report Structure
 
-    *E10 (Other elected members)*
-    - Shared Themes: [summary]
-    - [Country-specific summaries]
+1. *Executive Overview* (5 concise bullets)
+   - Capture the most important points from Secretariat briefers.
+   - Highlight the most notable interventions or divides among Member States.
 
-    ### *Observers/Invited States*
-    - [Country-specific summaries]
-    ---
+2. ### Summary of Briefings
+   - Each UN briefer in one short paragraph (5–7 sentences).
+   - Include major facts, statistics, and warnings.
 
-     *Tone:*
-     - Neutral, diplomatic, professional.
-     - Concise: 3–5 sentences per speaker.
-     - Avoid repetition and procedural details.
-     - Focus on key themes, positions, and notable quotes.
+3. ### Member States
+   - Organized in blocs:
+     - *P3 (US, UK, France)*
+     - *Russia & China*
+     - *A3+ (Algeria, Guyana, Sierra Leone, Somalia)*
+     - *E10 (other elected members)*
+   - For each bloc:
+     - Begin with *Shared Themes*.
+     - Then 2–4 sentence summaries per country.
+   - Highlight *new, striking or unusual positions*, not just generic support/condemnation.
 
+4. ### Observers/Invited States
+   - Summarize each in 2–3 sentences.
+   - Focus on distinct contributions, not repetition.
+
+5. ### Overall Assessment
+   - One short paragraph synthesizing consensus, divides, or key dynamics.
+
+---
+
+### Output Requirements
+- First produce the *full report in English*.
     *Transcript:*
     {transcript}
     """).strip()

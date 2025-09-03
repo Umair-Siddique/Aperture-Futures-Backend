@@ -5,7 +5,8 @@ load_dotenv()
 
 class Config:
 		SUPABASE_URL = os.getenv("SUPABASE_URL")
-		SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY")
+		SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")  # For public operations
+		SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")  # For admin operations
 		OPENAI_API_KEY   = os.getenv("OPENAI_API_KEY")
 		PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 		anthropic_api_key = os.getenv("CLAUDE_API_KEY")
@@ -27,3 +28,4 @@ class Config:
 
 		# Optional: front-end URL for password reset link (if you want links to point to the frontend)
 		PASSWORD_RESET_URL_BASE = os.getenv("PASSWORD_RESET_URL_BASE")  # e.g. https://app.example.com/reset-password
+		FRONTEND_RESET_PASSWORD_URL = os.getenv("FRONTEND_RESET_PASSWORD_URL", "http://localhost:5173/reset-password")

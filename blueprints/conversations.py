@@ -4,37 +4,62 @@ from datetime import datetime
 from math import ceil
 
 conversations_bp = Blueprint('conversations', __name__)
-
 # --- CREATE CONVERSATION ENDPOINT ---
 @conversations_bp.route("/create", methods=["POST"])
 @token_required
 def create_conversation(user):
-    """Create a new conversation for the authenticated user."""
+    """Create a new conversation for the authenticated user, or return existing if title exists."""
     data = request.get_json()
-    
+
     if not data:
         return jsonify({"error": "Request body is required"}), 400
-    
+
     title = data.get("title", "New Conversation")
-    
+
     if not isinstance(title, str) or len(title.strip()) == 0:
         return jsonify({"error": "Title must be a non-empty string"}), 400
-    
+
     # Trim whitespace
     title = title.strip()
-    
+
     try:
-        # Insert new conversation
-        response = current_app.supabase.table('lifelines_conversations').insert({
-            "user_id": user.id,
-            "title": title
-        }).execute()
-        
+        # ✅ Check if a conversation with the same title already exists for this user
+        existing = (
+            current_app.supabase.table("lifelines_conversations")
+            .select("id, title, created_at, updated_at")
+            .eq("user_id", user.id)
+            .eq("title", title)
+            .limit(1)
+            .execute()
+        )
+
+        if existing.data and len(existing.data) > 0:
+            conversation = existing.data[0]
+            return jsonify({
+                "message": "Conversation already exists",
+                "conversation": {
+                    "id": conversation["id"],
+                    "title": conversation["title"],
+                    "created_at": conversation["created_at"],
+                    "updated_at": conversation["updated_at"]
+                }
+            }), 200
+
+        # ✅ Otherwise, insert a new conversation
+        response = (
+            current_app.supabase.table("lifelines_conversations")
+            .insert({
+                "user_id": user.id,
+                "title": title
+            })
+            .execute()
+        )
+
         if not response.data:
             return jsonify({"error": "Failed to create conversation"}), 500
-        
+
         conversation = response.data[0]
-        
+
         return jsonify({
             "message": "Conversation created successfully",
             "conversation": {
@@ -44,10 +69,12 @@ def create_conversation(user):
                 "updated_at": conversation["updated_at"]
             }
         }), 201
-        
+
     except Exception as e:
         current_app.logger.error(f"Error creating conversation: {e}")
         return jsonify({"error": "Failed to create conversation"}), 500
+
+
 
 # --- UPDATE CONVERSATION TITLE ENDPOINT ---
 @conversations_bp.route("/<conversation_id>/update-title", methods=["PUT"])
