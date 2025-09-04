@@ -125,7 +125,9 @@ def check_rate_limit(email, ip_address, attempt_type):
         return result.data if result.data else False
     except Exception as e:
         print(f"Rate limit check error: {e}")
-        return False
+        print(f"Error type: {type(e)}")
+        # Return True to allow the request to proceed even if rate limiting fails
+        return True
 
 def log_attempt(email, ip_address, user_agent, attempt_type, success):
     """Log attempt to database."""
