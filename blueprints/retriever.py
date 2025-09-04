@@ -69,7 +69,7 @@ def retrieve_transcript(user):
             .table('lifelines_messages')
             .select('role, content')
             .eq('conversation_id', conversation_id)
-            .order('created_at', desc=False)  # Oldest first
+            .order('created_at', desc=True)  
             .limit(10)  # Get last 10 messages (5 exchanges)
             .execute()
         )
