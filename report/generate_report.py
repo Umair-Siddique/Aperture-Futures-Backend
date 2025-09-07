@@ -1,13 +1,13 @@
 from textwrap import dedent
-from langchain_openai import ChatOpenAI  
-from config import Config
-from textwrap import dedent
 from typing import Dict
 from flask import current_app
+from config import Config
+from groq import Groq
 
-def _build_un_report_prompt(transcript: str) -> str:
-    """Return the exact prompt template you provided with the transcript appended."""
-    return dedent(f"""
+
+def _build_system_prompt() -> str:
+    """Return the instructions for formatting and structuring the report."""
+    return dedent("""
 You are a UN policy analyst. Convert the following raw UN Security Council transcript into a concise diplomatic report.
 
 ### General Formatting & Structure Rules
@@ -89,35 +89,29 @@ You are a UN policy analyst. Convert the following raw UN Security Council trans
 
 ### Output Requirements
 - First produce the *full report in English*.
-    *Transcript:*
-    {transcript}
     """).strip()
 
 
 def generate_and_store_transcription_report(title: str, transcript: str) -> dict:
     """
-    Generates a diplomatic report from the full transcript and stores it into
-    audio_files.transcription_report for the given title. Returns dict with status.
+    Generates a diplomatic report from the full transcript using Groq Cloud
+    and stores it into audio_files.transcription_report for the given title.
     """
-    # Safety guard: keep payload reasonable for the model
-    # (adjust limit as needed depending on the model you use)
-    MAX_CHARS = 180_000
-    transcript_for_llm = transcript[:MAX_CHARS]
 
-    prompt = _build_un_report_prompt(transcript_for_llm)
+    system_prompt = _build_system_prompt()
 
-    # Use a stronger/more recent model if you like; fall back to what you already use
-    llm = ChatOpenAI(
-        openai_api_key=Config.OPENAI_API_KEY,
-        model_name=getattr(Config, "TRANSCRIPTION_REPORT_MODEL", "gpt-4o-mini"),
-        model='gpt-5'
+    # Use Groq client from extensions.py
+    client: Groq = current_app.groq  
+
+    completion = client.chat.completions.create(
+        model="meta-llama/llama-4-scout-17b-16e-instruct",
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": transcript}
+        ]
     )
 
-    resp = llm.invoke([
-        {"role": "system", "content": "You are a neutral UN Security Council analyst producing concise diplomatic reports."},
-        {"role": "user", "content": prompt}
-    ])
-    report = resp.content if hasattr(resp, "content") else resp["content"]
+    report = completion.choices[0].message.content
 
     # Store into Supabase
     current_app.supabase.table("audio_files") \
@@ -125,4 +119,4 @@ def generate_and_store_transcription_report(title: str, transcript: str) -> dict
         .eq("title", title) \
         .execute()
 
-    return {"ok": True, "chars_used": len(transcript_for_llm)}
+    return {"ok": True, "chars_used": len(transcript)}
