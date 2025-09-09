@@ -1,0 +1,31 @@
+{
+  "resolution_no": "2213",
+  "year": 2015,
+  "theme": [
+    "Peacekeeping",
+    "Sanctions",
+    "Terrorism",
+    "Humanitarian",
+    "WPS/CAAC"
+  ],
+  "chapter": "Chapter VII",
+  "charter_articles": [
+    "Article 24",
+    "Article 25",
+    "Article 39",
+    "Article 41",
+    "Article 42"
+  ],
+  "entities": [
+    "UNSMIL",
+    "Panel of Experts",
+    "International Criminal Court (ICC)",
+    "Libyan government",
+    "Al-Qaida",
+    "Islamic State in Iraq and the Levant (ISIL)"
+  ],
+  "reporting_cycle": "at least every 60 days",
+  "operative_authority": "Chapter VII",
+  "summary": "27. Requests the Secretary-General to report on the implementation of this resolution every 60 days.\n\n28. Affirms its readiness to review the measures in this resolution, including strengthening, modifying, suspending or lifting them, and the mandate of UNSMIL, as needed, in light of developments in Libya.\n\n29. Decides to remain actively seized of the matter.",
+  "url": "https://storage.googleapis.com/bluelines-rag-bucket/2015/S_RES_2213_2015_EN.pdf"
+}

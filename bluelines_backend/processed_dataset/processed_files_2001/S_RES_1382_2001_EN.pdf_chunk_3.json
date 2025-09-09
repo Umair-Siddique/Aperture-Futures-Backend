@@ -1,0 +1,24 @@
+{
+  "resolution_no": "1382",
+  "year": "2001",
+  "theme": [
+    "Humanitarian",
+    "Sanctions",
+    "Peacekeeping"
+  ],
+  "chapter": "Chapter VII",
+  "charter_articles": [
+    "Article 39",
+    "Article 41",
+    "Article 42"
+  ],
+  "entities": [
+    "UNMOVIC",
+    "IAEA",
+    "Office of the Iraq Programme (OIP)"
+  ],
+  "reporting_cycle": "Secretary-General reports every 180 days",
+  "operative_authority": "Chapter VII",
+  "summary": "**Note**: Items a-e do not require review if contained in contracts for civil telecommunications projects.\n\n**Section 8**\n\nThe following items are subject to review:\n\n* **Image intensifier night vision systems**\n\t+ Systems using microchannel plate and specific photocathodes (a)\n\t+ Tubes with sensitivity of 240 micro Amps per lumen and below (b)\n\t+ Microchannel plates of 15 micrometers and above (c)\n\t+ Software and technology for developing or producing the above components or equipment (d-e)\n\n* **Specialized radar equipment**\n\t+ Airborne radar equipment and components, excluding meteorological use or civilian air traffic control equipment (a)\n\t+ Ground-based primary radar systems capable of aircraft detection and tracking (b)\n\t+ Software and technology for developing or producing the above components or equipment (c-d)\n\n* **Non-civil certified aircraft, aero gas turbine engines, unmanned aerial vehicles, and parts and components**\n\t+ Non-civil certified aircraft and parts (a)\n\t+ Gas turbine engines for non-stationary power generation and parts (b)\n\t+ Unmanned aerial vehicles with specific characteristics (c)\n\t+ Parts and components for civil-certified aircraft, with certain exceptions (d)\n\n**Notes**: Certain exceptions and exemptions apply to parts and components for civil-certified aircraft.\nHere is a summarized version of the Security Council document:\n\n**Marine Acoustic Equipment**\n\n* Marine acoustic systems, equipment, and components, including:\n\t+ Active systems for sea bed topographic mapping (depths < 600m)\n\t+ Passive systems, including:\n\t\t- Hydrophones with sensitivity > -220 Db\n\t\t- Towed acoustic hydrophone arrays (operating depths > 15m but ≤ 35m)\n\t\t- Heading sensors with accuracy > +/- 0.5 degrees\n\t\t- Processing equipment for towed arrays and bottom/bay cable systems\n\t+ Correlation-velocity sonar log equipment for measuring horizontal speed relative to seabed\n\n**Charges and Devices for Civil Projects**",
+  "url": "https://storage.googleapis.com/bluelines-rag-bucket/2001/S_RES_1382_2001_EN.pdf"
+}

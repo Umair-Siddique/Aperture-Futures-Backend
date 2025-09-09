@@ -1,0 +1,27 @@
+{
+  "resolution_no": "1511",
+  "year": "2003",
+  "theme": [
+    "Peacekeeping",
+    "Political",
+    "Reconstruction",
+    "Terrorism",
+    "WPS/CAAC"
+  ],
+  "chapter": "Chapter VII",
+  "charter_articles": [
+    "Article 39",
+    "Article 41",
+    "Article 42"
+  ],
+  "entities": [
+    "United Nations Assistance Mission for Iraq",
+    "Multinational force",
+    "Iraqi Governing Council",
+    "Coalition Provisional Authority"
+  ],
+  "reporting_cycle": "every six months",
+  "operative_authority": "Chapter VII",
+  "summary": "Urges support for the Iraq reconstruction effort and help to meet the needs of the Iraqi people. \nEmphasizes the importance of the International Advisory and Monitoring Board. \nReminds Member States of their obligations under previous resolutions. \nRequests the US to report on the multinational force's efforts. \nDecides to remain seized of the matter.",
+  "url": "https://storage.googleapis.com/bluelines-rag-bucket/2003/S_RES_1511_2003_EN.pdf"
+}

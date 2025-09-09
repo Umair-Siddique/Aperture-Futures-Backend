@@ -1,0 +1,24 @@
+{
+  "resolution_no": "1382",
+  "year": "2001",
+  "theme": [
+    "Humanitarian",
+    "Sanctions",
+    "Peacekeeping"
+  ],
+  "chapter": "Chapter VII",
+  "charter_articles": [
+    "Article 39",
+    "Article 41",
+    "Article 42"
+  ],
+  "entities": [
+    "UNMOVIC",
+    "IAEA",
+    "Office of the Iraq Programme (OIP)"
+  ],
+  "reporting_cycle": "Secretary-General reports every 180 days",
+  "operative_authority": "Chapter VII",
+  "summary": "**Charges and Devices for Civil Projects**\n\n* Charges and devices containing small quantities of specific energetic materials, including:\n\t1. HMX (Cyclotetramethylenetetranitramine)\n\t2. Hexanitrostilbene (HNS)\n\t3. Triaminotrinitrobenzene (TATB)\n\t4. Triaminoguanidinenitrate (TAGN)\n\t5. Dinitroglycoluril (DNGU, DINGU)\n\t6. Tetranitrobenzotriazolobenzotriazole (TACOT)\n\t7. Diaminohexanitrobiphenyl (DIPAM)\n\t8. Picrylaminodinitropyridine (PYX)\n\t9. 3-nitro-1,2,4-triazol-5-one (NTO or ONTA)\n\t10. Cyclotrimethylenetrinitramine (RDX)\n\t11. 2-(5-cyanotetrazolato) penta amine-cobalt (III) -perchlorate (CP)\n\t12. cis-bis (5-nitrotetrazolato) tetra amine-cobalt (III) perchlorate (BNCP)\n\t13-20. Various other energetic materials\n\t21. Explosives with detonation velocity > 8,700 m/s or pressure > 34 GPa\n\t22. Organic explosives with detonation pressures ≥ 25 GPa and stable at ≥ 523 K\n\t23-24. Specific UN Class 1.1 and 1.3 solid propellants with high theoretical specific impulse\n\n**Note**: Energetic materials not part of a charge or device for civil projects are considered military items subject to UNSCR 687, para. 24.\nThe document outlines specific equipment and technologies subject to certain restrictions. \n\nThe equipment includes: \n- Specialized vibration test equipment capable of simulating flight conditions of less than 15,000 meters, along with associated software and technology for its development or production.\n\n- Specialized semiconductor manufacturing equipment for producing devices with a minimum feature size of 1.0 micrometers, including:\n  - Equipment for plasma etch, CVD, lithography, and more.\n  - Ion implantation equipment with beam energy exceeding 200 keV or optimized for less than 10 keV.\n  - Surface finishing equipment for semiconductor wafers.\n  - CAD equipment for semiconductor design.\n  - Equipment for assembling integrated circuits.\n\n- Certain biological equipment, specifically for the microencapsulation of live microorganisms and toxins in particle sizes of 1-15 microns.",
+  "url": "https://storage.googleapis.com/bluelines-rag-bucket/2001/S_RES_1382_2001_EN.pdf"
+}

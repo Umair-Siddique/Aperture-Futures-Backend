@@ -1,0 +1,24 @@
+{
+  "resolution_no": "1382",
+  "year": "2001",
+  "theme": [
+    "Humanitarian",
+    "Sanctions",
+    "Peacekeeping"
+  ],
+  "chapter": "Chapter VII",
+  "charter_articles": [
+    "Article 39",
+    "Article 41",
+    "Article 42"
+  ],
+  "entities": [
+    "UNMOVIC",
+    "IAEA",
+    "Office of the Iraq Programme (OIP)"
+  ],
+  "reporting_cycle": "Secretary-General reports every 180 days",
+  "operative_authority": "Chapter VII",
+  "summary": "The document outlines the Proposed Goods Review List (GRL) with technical parameters for individual items. \n\n**1. Advanced Telecommunication Equipment**\n\n- Telecommunications equipment operating outside -55°C to 124°C temperature range.\n- Phased array antennae with electronic beam control, excluding certain landing systems.\n- Radio relay communications equipment for 7.9-10.55 GHz or above 40 GHz frequencies.\n- Optical fiber cables over 5 meters, and related components.\n- Software and technology for developing/producing these items.\n\n**2. Information Security Equipment**\n\n- Equipment with symmetric/asymmetric encryption, discrete-log encryption, or analog encryption/scrambling.\n- TCSEC B1, B2, B3, or A1 or equivalent MLS computer systems.\n- Software and technology for developing/producing these items.\n\n**Exemptions:**\n\n- Widely available, non-upgradable, user-installable items with details accessible to authorities.\n- Personalized smart cards with restricted cryptographic capability.\n- Receiving equipment for radio broadcasts without digital encryption.\n- Equipment with limited cryptographic capability for specific uses (e.g., copy protection, intellectual property rights).\n- Banking/money transaction equipment.\n- Certain radiotelephones and cordless telephones.\n\n**3. Specialized Electronic Instrumentation and Test Equipment**\n\n- Signal analysers, microwave test receivers, network analysers, and signal generators from 4-40 GHz.\nHere is a summarized version of the Security Council document:\n\n**Section 7**\n\nThe following items are subject to review:\n\n* Travelling wave tubes, including coupled cavity tubes and helix tubes, with specific characteristics (e.1-2)\n* Equipment for manufacturing electron tubes, optical elements, and components (f)\n* Hydrogen/hydrogen-isotope thyratrons with peak current of 500 A or more (g)\n* Digital instrumentation data recorders with high transfer rates or space-qualified (h)\n* Radiation and radioisotope detection and simulation equipment, analysers, and software (i)\n* Software and technology for developing or producing the above components or equipment (j-k)\n\n**Note**: Items a-e do not require review if contained in contracts for civil telecommunications projects.\n\n**Section 8**\n\nThe following items are subject to review:",
+  "url": "https://storage.googleapis.com/bluelines-rag-bucket/2001/S_RES_1382_2001_EN.pdf"
+}
