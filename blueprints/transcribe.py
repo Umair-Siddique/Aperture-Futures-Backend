@@ -1,5 +1,6 @@
 from flask import Blueprint, request, jsonify, current_app
 from werkzeug.utils import secure_filename
+from werkzeug.datastructures import FileStorage
 import os
 import time
 import uuid
@@ -31,6 +32,8 @@ client = OpenAI(api_key=Config.OPENAI_API_KEY)
 
 
 MAX_FILE_SIZE = 25 * 1024 * 1024  # 25 MB in bytes
+MAX_UPLOAD_SIZE = 100 * 1024 * 1024  # 100 MB max upload
+CHUNK_SIZE = 8192  # 8KB chunks for streaming
 CHUNK_DURATION_SECONDS = 30  # Reduced from 60 to 30 seconds for better memory management
 MAX_CONCURRENT_CHUNKS = 3  # Limit concurrent processing
 MEMORY_THRESHOLD_PERCENT = 80  # Memory usage threshold for cleanup
@@ -43,6 +46,20 @@ def check_memory_usage():
         gc.collect()
         return True
     return False
+
+def save_uploaded_file_streaming(file_storage: FileStorage, target_path: str) -> bool:
+    """Save uploaded file using streaming to handle large files efficiently."""
+    try:
+        with open(target_path, 'wb') as f:
+            while True:
+                chunk = file_storage.read(CHUNK_SIZE)
+                if not chunk:
+                    break
+                f.write(chunk)
+        return True
+    except Exception as e:
+        current_app.logger.error(f"Error saving file: {str(e)}")
+        return False
 
 def split_audio_into_chunks_optimized(input_path: str, max_size=MAX_FILE_SIZE):
     """Optimized audio chunking with memory management."""
@@ -224,26 +241,44 @@ def batch_embed_and_upsert_optimized(chunks, safe_namespace, batch_size=8):
 @transcribe_bp.route("/audio", methods=["POST"])
 @token_required
 def transcribe_and_store(user):
+    # Get form data first (before file processing)
     title = request.form.get("title")
     description = request.form.get("description")
     members_raw = request.form.get("members")
-    audio_file = request.files.get("audio")
-
-    if not title or not audio_file or not description or not members_raw:
-        return jsonify({"error": "title, description, members, and audio file required"}), 400
+    
+    if not title or not description or not members_raw:
+        return jsonify({"error": "title, description, and members are required"}), 400
 
     members_list = [m.strip() for m in members_raw.split(",") if m.strip()]
     if not members_list:
         return jsonify({"error": "members cannot be empty"}), 400
 
+    # Check for file in request
+    if 'audio' not in request.files:
+        return jsonify({"error": "No audio file provided"}), 400
+    
+    audio_file = request.files['audio']
+    if audio_file.filename == '':
+        return jsonify({"error": "No audio file selected"}), 400
+
+    # Check file size before processing
+    audio_file.seek(0, 2)  # Seek to end
+    file_size = audio_file.tell()
+    audio_file.seek(0)  # Reset to beginning
+    
+    if file_size > MAX_UPLOAD_SIZE:
+        return jsonify({"error": f"File too large. Maximum size: {MAX_UPLOAD_SIZE // (1024*1024)}MB"}), 413
+
     # Check memory usage before starting
     check_memory_usage()
 
-    # Save uploaded file temporarily
+    # Save uploaded file using streaming
     filename = f"{uuid.uuid4().hex}_{secure_filename(audio_file.filename)}"
     temp_dir = tempfile.gettempdir()
     filepath = os.path.join(temp_dir, filename)
-    audio_file.save(filepath)
+    
+    if not save_uploaded_file_streaming(audio_file, filepath):
+        return jsonify({"error": "Failed to save uploaded file"}), 500
 
     try:
         # Insert metadata into Supabase
@@ -307,6 +342,24 @@ def transcribe_and_store(user):
                 os.remove(filepath)
         except Exception:
             pass
+
+@transcribe_bp.route("/health", methods=["GET"])
+def health_check():
+    """Health check endpoint to monitor system status."""
+    try:
+        memory_percent = psutil.virtual_memory().percent
+        return jsonify({
+            "status": "healthy",
+            "memory_usage_percent": memory_percent,
+            "max_upload_size_mb": MAX_UPLOAD_SIZE // (1024 * 1024),
+            "timestamp": int(time.time())
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "status": "unhealthy",
+            "error": str(e),
+            "timestamp": int(time.time())
+        }), 500
 
 @transcribe_bp.route("/list-transcription", methods=["GET"])
 @token_required

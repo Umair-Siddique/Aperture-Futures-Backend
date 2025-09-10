@@ -1,5 +1,6 @@
 from flask import Flask
 from config import Config
+import tempfile
 from extensions import init_supabase,init_groq,init_anthropic,init_openai_embeddings,init_pinecone
 from blueprints.auth import auth_bp
 from blueprints.transcribe import transcribe_bp
@@ -18,6 +19,10 @@ from flask_cors import CORS
 def create_app():
     app = Flask(__name__)
     app.config.from_object(Config)
+    
+    # Add configurations for large file uploads
+    app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100 MB max file size
+    app.config['UPLOAD_FOLDER'] = tempfile.gettempdir()
 
     CORS(app, supports_credentials=True, origins=['http://localhost:5173','https://blue-lines-life-lines-rag.vercel.app'])
 
