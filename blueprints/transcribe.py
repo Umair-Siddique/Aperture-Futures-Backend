@@ -28,7 +28,15 @@ import queue
 import psutil
 
 transcribe_bp = Blueprint('transcribe', __name__)
-client = OpenAI(api_key=Config.OPENAI_API_KEY)
+
+# Initialize OpenAI client with error handling
+try:
+    if not Config.OPENAI_API_KEY:
+        raise ValueError("OPENAI_API_KEY not found in environment variables")
+    client = OpenAI(api_key=Config.OPENAI_API_KEY)
+except Exception as e:
+    print(f"Error initializing OpenAI client: {e}")
+    client = None
 
 
 MAX_FILE_SIZE = 25 * 1024 * 1024  # 25 MB in bytes
@@ -63,16 +71,28 @@ def save_uploaded_file_streaming(file_storage: FileStorage, target_path: str) ->
 
 def split_audio_into_chunks_optimized(input_path: str, max_size=MAX_FILE_SIZE):
     """Optimized audio chunking with memory management."""
+    current_app.logger.info(f"Starting audio chunking for: {input_path}")
+    
     try:
+        # Check if input file exists
+        if not os.path.exists(input_path):
+            current_app.logger.error(f"Input file does not exist: {input_path}")
+            return []
+        
         # Load audio with librosa using lower sample rate for memory efficiency
+        current_app.logger.info("Loading audio with librosa...")
         audio, sr = librosa.load(input_path, sr=16000)  # Reduced sample rate
         duration_samples = len(audio)
         duration_seconds = duration_samples / sr
+        
+        current_app.logger.info(f"Audio loaded: {duration_seconds:.2f} seconds, {sr}Hz sample rate")
 
         chunks = []
         start_sample = 0
+        chunk_count = 0
         
         while start_sample < duration_samples:
+            chunk_count += 1
             # Start with smaller chunks for better memory management
             chunk_duration_seconds = CHUNK_DURATION_SECONDS
             end_sample = min(start_sample + int(chunk_duration_seconds * sr), duration_samples)
@@ -97,90 +117,152 @@ def split_audio_into_chunks_optimized(input_path: str, max_size=MAX_FILE_SIZE):
                     size = os.path.getsize(tmpf.name)
                 
                 chunks.append(tmpf.name)
+                current_app.logger.info(f"Created chunk {chunk_count}: {size} bytes, {chunk_duration_seconds:.1f}s")
                 start_sample = end_sample
 
         # Clear audio from memory
         del audio
         gc.collect()
+        
+        current_app.logger.info(f"Successfully created {len(chunks)} audio chunks")
         return chunks
+        
     except Exception as e:
         current_app.logger.error(f"Error splitting audio with librosa: {str(e)}")
+        current_app.logger.error(f"Error type: {type(e).__name__}")
+        import traceback
+        current_app.logger.error(f"Traceback: {traceback.format_exc()}")
         return []
 
 
 def transcribe_audio_with_openai(audio_path: str):
     """Send audio to OpenAI Whisper for transcription with retry logic."""
     max_retries = 3
+    current_app.logger.info(f"Starting transcription for file: {audio_path}")
+    
+    # Check if OpenAI client is available
+    if not client:
+        current_app.logger.error("OpenAI client not initialized - check API key")
+        return ""
+    
+    # Check if file exists and get size
+    if not os.path.exists(audio_path):
+        current_app.logger.error(f"Audio file does not exist: {audio_path}")
+        return ""
+    
+    file_size = os.path.getsize(audio_path)
+    current_app.logger.info(f"Audio file size: {file_size} bytes")
+    
     for attempt in range(max_retries):
         try:
+            current_app.logger.info(f"Transcription attempt {attempt + 1}/{max_retries}")
             with open(audio_path, "rb") as f:
                 transcript = client.audio.transcriptions.create(
                     model="whisper-1",  # Use whisper-1 for better performance
                     file=f
                 )
-            return transcript.text if transcript else ""
+            
+            if transcript and transcript.text:
+                current_app.logger.info(f"Transcription successful, text length: {len(transcript.text)}")
+                return transcript.text
+            else:
+                current_app.logger.warning(f"Transcription returned empty result for {audio_path}")
+                return ""
+                
         except Exception as e:
-            current_app.logger.warning(f"Transcription attempt {attempt + 1} failed: {str(e)}")
+            error_msg = f"Transcription attempt {attempt + 1} failed: {str(e)}"
+            current_app.logger.error(error_msg)
+            current_app.logger.error(f"Error type: {type(e).__name__}")
+            
             if attempt == max_retries - 1:
                 current_app.logger.error(f"All transcription attempts failed for {audio_path}")
                 return ""
-            time.sleep(1)  # Wait before retry
+            time.sleep(2)  # Wait before retry
+    
     return ""
 
 
 def transcribe_large_audio_optimized(audio_path: str):
     """Optimized large audio transcription with concurrent processing and memory management."""
-    all_chunks = split_audio_into_chunks_optimized(audio_path, MAX_FILE_SIZE)
-    if not all_chunks:
+    current_app.logger.info(f"Starting large audio transcription for: {audio_path}")
+    
+    # Check if input file exists
+    if not os.path.exists(audio_path):
+        current_app.logger.error(f"Input audio file does not exist: {audio_path}")
         return ""
     
-    transcripts = []
-    total_chunks = len(all_chunks)
-    current_app.logger.info(f"Processing {total_chunks} audio chunks")
+    input_file_size = os.path.getsize(audio_path)
+    current_app.logger.info(f"Input file size: {input_file_size} bytes")
     
-    # Process chunks in batches to manage memory
-    for i in range(0, len(all_chunks), MAX_CONCURRENT_CHUNKS):
-        batch_chunks = all_chunks[i:i + MAX_CONCURRENT_CHUNKS]
-        batch_num = i // MAX_CONCURRENT_CHUNKS + 1
-        total_batches = (total_chunks + MAX_CONCURRENT_CHUNKS - 1) // MAX_CONCURRENT_CHUNKS
+    try:
+        all_chunks = split_audio_into_chunks_optimized(audio_path, MAX_FILE_SIZE)
+        if not all_chunks:
+            current_app.logger.error("Failed to split audio into chunks")
+            return ""
         
-        current_app.logger.info(f"Processing batch {batch_num}/{total_batches}")
+        transcripts = []
+        total_chunks = len(all_chunks)
+        current_app.logger.info(f"Successfully created {total_chunks} audio chunks")
         
-        # Check memory usage before processing batch
-        check_memory_usage()
-        
-        # Use ThreadPoolExecutor for concurrent processing
-        with ThreadPoolExecutor(max_workers=min(len(batch_chunks), MAX_CONCURRENT_CHUNKS)) as executor:
-            # Submit transcription tasks
-            future_to_chunk = {
-                executor.submit(transcribe_audio_with_openai, chunk_path): chunk_path 
-                for chunk_path in batch_chunks
-            }
+        # Process chunks in batches to manage memory
+        for i in range(0, len(all_chunks), MAX_CONCURRENT_CHUNKS):
+            batch_chunks = all_chunks[i:i + MAX_CONCURRENT_CHUNKS]
+            batch_num = i // MAX_CONCURRENT_CHUNKS + 1
+            total_batches = (total_chunks + MAX_CONCURRENT_CHUNKS - 1) // MAX_CONCURRENT_CHUNKS
             
-            # Collect results as they complete
-            for future in as_completed(future_to_chunk):
-                chunk_path = future_to_chunk[future]
-                try:
-                    text = future.result()
-                    if text:
-                        transcripts.append(text)
-                except Exception as e:
-                    current_app.logger.error(f"Error transcribing chunk {chunk_path}: {str(e)}")
-                finally:
-                    # Cleanup chunk file
+            current_app.logger.info(f"Processing batch {batch_num}/{total_batches} with {len(batch_chunks)} chunks")
+            
+            # Check memory usage before processing batch
+            check_memory_usage()
+            
+            # Use ThreadPoolExecutor for concurrent processing
+            with ThreadPoolExecutor(max_workers=min(len(batch_chunks), MAX_CONCURRENT_CHUNKS)) as executor:
+                # Submit transcription tasks
+                future_to_chunk = {
+                    executor.submit(transcribe_audio_with_openai, chunk_path): chunk_path 
+                    for chunk_path in batch_chunks
+                }
+                
+                # Collect results as they complete
+                for future in as_completed(future_to_chunk):
+                    chunk_path = future_to_chunk[future]
                     try:
-                        os.remove(chunk_path)
-                    except Exception:
-                        pass
+                        text = future.result()
+                        if text:
+                            transcripts.append(text)
+                            current_app.logger.info(f"Successfully transcribed chunk: {chunk_path}")
+                        else:
+                            current_app.logger.warning(f"Empty transcription for chunk: {chunk_path}")
+                    except Exception as e:
+                        current_app.logger.error(f"Error transcribing chunk {chunk_path}: {str(e)}")
+                    finally:
+                        # Cleanup chunk file
+                        try:
+                            os.remove(chunk_path)
+                        except Exception as e:
+                            current_app.logger.warning(f"Failed to cleanup chunk file {chunk_path}: {str(e)}")
+            
+            # Force garbage collection after each batch
+            gc.collect()
+            
+            # Check memory usage after processing batch
+            check_memory_usage()
         
-        # Force garbage collection after each batch
-        gc.collect()
+        final_transcript = " ".join(transcripts)
+        current_app.logger.info(f"Completed transcription of {total_chunks} chunks, final text length: {len(final_transcript)}")
         
-        # Check memory usage after processing batch
-        check_memory_usage()
-    
-    current_app.logger.info(f"Completed transcription of {total_chunks} chunks")
-    return " ".join(transcripts)
+        if not final_transcript.strip():
+            current_app.logger.error("Final transcript is empty")
+            return ""
+            
+        return final_transcript
+        
+    except Exception as e:
+        current_app.logger.error(f"Error in transcribe_large_audio_optimized: {str(e)}")
+        current_app.logger.error(f"Error type: {type(e).__name__}")
+        import traceback
+        current_app.logger.error(f"Traceback: {traceback.format_exc()}")
+        return ""
 
 
 # Helper: Chunk Text Using RecursiveCharacterTextSplitter
@@ -295,9 +377,22 @@ def transcribe_and_store(user):
         transcript = transcribe_large_audio_optimized(filepath)
 
         if not transcript:
-            # Clean up database entry if transcription failed
-            current_app.supabase.table('audio_files').delete().eq("title", title).execute()
-            return jsonify({"error": "Transcription failed"}), 500
+            current_app.logger.warning("Optimized transcription failed, trying fallback method...")
+            # Try fallback method - direct transcription without chunking
+            try:
+                transcript = transcribe_audio_with_openai(filepath)
+                if not transcript:
+                    current_app.logger.error("Both optimized and fallback transcription failed")
+                    # Clean up database entry if transcription failed
+                    current_app.supabase.table('audio_files').delete().eq("title", title).execute()
+                    return jsonify({"error": "Transcription failed - both optimized and fallback methods failed"}), 500
+                else:
+                    current_app.logger.info("Fallback transcription successful")
+            except Exception as e:
+                current_app.logger.error(f"Fallback transcription also failed: {str(e)}")
+                # Clean up database entry if transcription failed
+                current_app.supabase.table('audio_files').delete().eq("title", title).execute()
+                return jsonify({"error": f"Transcription failed: {str(e)}"}), 500
 
         # Report generation
         report_info = {}
@@ -358,6 +453,55 @@ def health_check():
         return jsonify({
             "status": "unhealthy",
             "error": str(e),
+            "timestamp": int(time.time())
+        }), 500
+
+@transcribe_bp.route("/test-transcription", methods=["POST"])
+@token_required
+def test_transcription(user):
+    """Test endpoint to debug transcription issues."""
+    try:
+        # Check if client is initialized
+        if not client:
+            return jsonify({
+                "status": "error",
+                "openai_working": False,
+                "error": "OpenAI client not initialized - check API key configuration",
+                "timestamp": int(time.time())
+            }), 500
+        
+        # Check if test file exists
+        test_file_path = "testing_audios/3431341.mp3"
+        if not os.path.exists(test_file_path):
+            return jsonify({
+                "status": "error",
+                "openai_working": False,
+                "error": f"Test file not found: {test_file_path}",
+                "timestamp": int(time.time())
+            }), 500
+        
+        # Test OpenAI API connection
+        with open(test_file_path, "rb") as f:
+            test_response = client.audio.transcriptions.create(
+                model="whisper-1",
+                file=f
+            )
+        
+        return jsonify({
+            "status": "success",
+            "openai_working": True,
+            "test_transcription_length": len(test_response.text) if test_response.text else 0,
+            "api_key_configured": bool(Config.OPENAI_API_KEY),
+            "timestamp": int(time.time())
+        }), 200
+        
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "openai_working": False,
+            "error": str(e),
+            "error_type": type(e).__name__,
+            "api_key_configured": bool(Config.OPENAI_API_KEY),
             "timestamp": int(time.time())
         }), 500
 
