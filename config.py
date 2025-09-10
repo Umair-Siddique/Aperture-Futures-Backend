@@ -4,6 +4,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class Config:
+	    
+		print(f"GROQ_API_KEY loaded: {bool(os.getenv('GROQ_API_KEY'))}")
+		
 		SUPABASE_URL = os.getenv("SUPABASE_URL")
 		SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")  # For public operations
 		SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")  # For admin operations

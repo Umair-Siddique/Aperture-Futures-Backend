@@ -2,7 +2,6 @@ from flask import Blueprint, request, jsonify, current_app
 from werkzeug.utils import secure_filename
 import os
 import time
-# import whisper  # Remove this import
 import uuid
 import tempfile
 import re
@@ -21,21 +20,35 @@ import librosa
 import soundfile as sf
 import imageio_ffmpeg
 from report.generate_report import generate_and_store_transcription_report
+import gc
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import queue
+import psutil
 
 transcribe_bp = Blueprint('transcribe', __name__)
 client = OpenAI(api_key=Config.OPENAI_API_KEY)
 
 
 MAX_FILE_SIZE = 25 * 1024 * 1024  # 25 MB in bytes
+CHUNK_DURATION_SECONDS = 30  # Reduced from 60 to 30 seconds for better memory management
+MAX_CONCURRENT_CHUNKS = 3  # Limit concurrent processing
+MEMORY_THRESHOLD_PERCENT = 80  # Memory usage threshold for cleanup
 
-# Remove the AudioSegment.converter line since we're not using pydub anymore
+def check_memory_usage():
+    """Check current memory usage and trigger cleanup if needed."""
+    memory_percent = psutil.virtual_memory().percent
+    if memory_percent > MEMORY_THRESHOLD_PERCENT:
+        current_app.logger.warning(f"High memory usage: {memory_percent}%")
+        gc.collect()
+        return True
+    return False
 
-
-def split_audio_into_chunks(input_path: str, max_size=MAX_FILE_SIZE):
-    """Split audio into chunks each ≤ max_size bytes using librosa."""
+def split_audio_into_chunks_optimized(input_path: str, max_size=MAX_FILE_SIZE):
+    """Optimized audio chunking with memory management."""
     try:
-        # Load audio with librosa
-        audio, sr = librosa.load(input_path, sr=None)
+        # Load audio with librosa using lower sample rate for memory efficiency
+        audio, sr = librosa.load(input_path, sr=16000)  # Reduced sample rate
         duration_samples = len(audio)
         duration_seconds = duration_samples / sr
 
@@ -43,31 +56,35 @@ def split_audio_into_chunks(input_path: str, max_size=MAX_FILE_SIZE):
         start_sample = 0
         
         while start_sample < duration_samples:
-            # Start with 1 minute chunks
-            chunk_duration_seconds = 60
+            # Start with smaller chunks for better memory management
+            chunk_duration_seconds = CHUNK_DURATION_SECONDS
             end_sample = min(start_sample + int(chunk_duration_seconds * sr), duration_samples)
             
             # Extract chunk
             chunk_audio = audio[start_sample:end_sample]
             
-            # Save chunk to temporary file
+            # Save chunk to temporary file with compression
             with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmpf:
-                sf.write(tmpf.name, chunk_audio, sr)
+                # Use lower bit depth for smaller file size
+                sf.write(tmpf.name, chunk_audio, sr, subtype='PCM_16')
                 size = os.path.getsize(tmpf.name)
                 
-                # If chunk is too large, reduce duration progressively
-                while size > max_size and chunk_duration_seconds > 10:
-                    chunk_duration_seconds -= 10
+                # If chunk is still too large, reduce duration progressively
+                while size > max_size and chunk_duration_seconds > 5:
+                    chunk_duration_seconds -= 5
                     end_sample = start_sample + int(chunk_duration_seconds * sr)
                     chunk_audio = audio[start_sample:end_sample]
                     
                     # Rewrite with smaller chunk
-                    sf.write(tmpf.name, chunk_audio, sr)
+                    sf.write(tmpf.name, chunk_audio, sr, subtype='PCM_16')
                     size = os.path.getsize(tmpf.name)
                 
                 chunks.append(tmpf.name)
                 start_sample = end_sample
 
+        # Clear audio from memory
+        del audio
+        gc.collect()
         return chunks
     except Exception as e:
         current_app.logger.error(f"Error splitting audio with librosa: {str(e)}")
@@ -75,24 +92,77 @@ def split_audio_into_chunks(input_path: str, max_size=MAX_FILE_SIZE):
 
 
 def transcribe_audio_with_openai(audio_path: str):
-    """Send audio to OpenAI Whisper for transcription."""
-    with open(audio_path, "rb") as f:
-        transcript = client.audio.transcriptions.create(
-            model="gpt-4o-mini-transcribe",
-            file=f
-        )
-    return transcript.text if transcript else ""
+    """Send audio to OpenAI Whisper for transcription with retry logic."""
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            with open(audio_path, "rb") as f:
+                transcript = client.audio.transcriptions.create(
+                    model="whisper-1",  # Use whisper-1 for better performance
+                    file=f
+                )
+            return transcript.text if transcript else ""
+        except Exception as e:
+            current_app.logger.warning(f"Transcription attempt {attempt + 1} failed: {str(e)}")
+            if attempt == max_retries - 1:
+                current_app.logger.error(f"All transcription attempts failed for {audio_path}")
+                return ""
+            time.sleep(1)  # Wait before retry
+    return ""
 
 
-def transcribe_large_audio(audio_path: str):
-    """Split large audio into chunks and transcribe each with Whisper."""
-    all_chunks = split_audio_into_chunks(audio_path, MAX_FILE_SIZE)
+def transcribe_large_audio_optimized(audio_path: str):
+    """Optimized large audio transcription with concurrent processing and memory management."""
+    all_chunks = split_audio_into_chunks_optimized(audio_path, MAX_FILE_SIZE)
+    if not all_chunks:
+        return ""
+    
     transcripts = []
-    for chunk_path in all_chunks:
-        text = transcribe_audio_with_openai(chunk_path)
-        if text:
-            transcripts.append(text)
-        os.remove(chunk_path)  # cleanup each chunk
+    total_chunks = len(all_chunks)
+    current_app.logger.info(f"Processing {total_chunks} audio chunks")
+    
+    # Process chunks in batches to manage memory
+    for i in range(0, len(all_chunks), MAX_CONCURRENT_CHUNKS):
+        batch_chunks = all_chunks[i:i + MAX_CONCURRENT_CHUNKS]
+        batch_num = i // MAX_CONCURRENT_CHUNKS + 1
+        total_batches = (total_chunks + MAX_CONCURRENT_CHUNKS - 1) // MAX_CONCURRENT_CHUNKS
+        
+        current_app.logger.info(f"Processing batch {batch_num}/{total_batches}")
+        
+        # Check memory usage before processing batch
+        check_memory_usage()
+        
+        # Use ThreadPoolExecutor for concurrent processing
+        with ThreadPoolExecutor(max_workers=min(len(batch_chunks), MAX_CONCURRENT_CHUNKS)) as executor:
+            # Submit transcription tasks
+            future_to_chunk = {
+                executor.submit(transcribe_audio_with_openai, chunk_path): chunk_path 
+                for chunk_path in batch_chunks
+            }
+            
+            # Collect results as they complete
+            for future in as_completed(future_to_chunk):
+                chunk_path = future_to_chunk[future]
+                try:
+                    text = future.result()
+                    if text:
+                        transcripts.append(text)
+                except Exception as e:
+                    current_app.logger.error(f"Error transcribing chunk {chunk_path}: {str(e)}")
+                finally:
+                    # Cleanup chunk file
+                    try:
+                        os.remove(chunk_path)
+                    except Exception:
+                        pass
+        
+        # Force garbage collection after each batch
+        gc.collect()
+        
+        # Check memory usage after processing batch
+        check_memory_usage()
+    
+    current_app.logger.info(f"Completed transcription of {total_chunks} chunks")
     return " ".join(transcripts)
 
 
@@ -113,23 +183,42 @@ def sanitize_id(name: str) -> str:
     return sanitized.lower()
 
 
-def batch_embed_and_upsert(chunks, safe_namespace, batch_size=16):
-    """Embed transcript chunks and upsert them into Pinecone."""
+def batch_embed_and_upsert_optimized(chunks, safe_namespace, batch_size=8):
+    """Optimized embedding and upsert with memory management."""
     total_chunks = len(chunks)
-    vectors = []
+    total_vectors = 0
+    
+    # Process in smaller batches to reduce memory usage
     for i in range(0, total_chunks, batch_size):
         batch_chunks = chunks[i:i+batch_size]
-        batch_embeds = current_app.embeddings.embed_documents(batch_chunks)
-        vectors.extend([
-            (
-                f"{safe_namespace}_{i+j}",
-                vec,
-                {"text": chunk}
-            )
-            for j, (vec, chunk) in enumerate(zip(batch_embeds, batch_chunks))
-        ])
-    current_app.pinecone_index.upsert(vectors=vectors, namespace=safe_namespace)
-    return len(vectors)
+        
+        try:
+            # Generate embeddings for this batch
+            batch_embeds = current_app.embeddings.embed_documents(batch_chunks)
+            
+            # Create vectors for this batch
+            vectors = [
+                (
+                    f"{safe_namespace}_{i+j}",
+                    vec,
+                    {"text": chunk}
+                )
+                for j, (vec, chunk) in enumerate(zip(batch_embeds, batch_chunks))
+            ]
+            
+            # Upsert this batch
+            current_app.pinecone_index.upsert(vectors=vectors, namespace=safe_namespace)
+            total_vectors += len(vectors)
+            
+            # Clear batch data from memory
+            del batch_embeds, vectors
+            gc.collect()
+            
+        except Exception as e:
+            current_app.logger.error(f"Error processing embedding batch {i//batch_size + 1}: {str(e)}")
+            continue
+    
+    return total_vectors
 
 
 @transcribe_bp.route("/audio", methods=["POST"])
@@ -147,49 +236,77 @@ def transcribe_and_store(user):
     if not members_list:
         return jsonify({"error": "members cannot be empty"}), 400
 
+    # Check memory usage before starting
+    check_memory_usage()
+
     # Save uploaded file temporarily
     filename = f"{uuid.uuid4().hex}_{secure_filename(audio_file.filename)}"
     temp_dir = tempfile.gettempdir()
     filepath = os.path.join(temp_dir, filename)
     audio_file.save(filepath)
 
-    # Insert metadata into Supabase
-    timestamp = int(time.time())
-    current_app.supabase.table('audio_files').insert({
-        "title": title,
-        "description": description,
-        "members": members_list,
-        "timestamp": timestamp
-    }).execute()
-
-    # Transcribe large file safely
-    transcript = transcribe_large_audio(filepath)
-
-    os.remove(filepath)  # cleanup uploaded file
-
-    if not transcript:
-        return jsonify({"error": "Transcription failed"}), 500
-
-    # Report generation
-    report_info = {}
     try:
-        report_info = generate_and_store_transcription_report(title=title, transcript=transcript)
+        # Insert metadata into Supabase
+        timestamp = int(time.time())
+        current_app.supabase.table('audio_files').insert({
+            "title": title,
+            "description": description,
+            "members": members_list,
+            "timestamp": timestamp
+        }).execute()
+
+        # Transcribe large file safely with optimized processing
+        current_app.logger.info(f"Starting transcription for: {title}")
+        transcript = transcribe_large_audio_optimized(filepath)
+
+        if not transcript:
+            # Clean up database entry if transcription failed
+            current_app.supabase.table('audio_files').delete().eq("title", title).execute()
+            return jsonify({"error": "Transcription failed"}), 500
+
+        # Report generation
+        report_info = {}
+        try:
+            report_info = generate_and_store_transcription_report(title=title, transcript=transcript)
+        except Exception as e:
+            current_app.logger.error("Report generation failed: %s", e)
+
+        # Chunk transcript → embeddings with optimized processing
+        current_app.logger.info(f"Processing embeddings for: {title}")
+        chunks = preprocess_and_chunk(transcript)
+        safe_namespace = sanitize_id(title)
+        chunks_stored = batch_embed_and_upsert_optimized(chunks, safe_namespace, batch_size=8)
+
+        # Final memory cleanup
+        del transcript, chunks
+        gc.collect()
+
+        current_app.logger.info(f"Successfully completed transcription for: {title}")
+        return jsonify({
+            "title": title,
+            "description": description,
+            "members": members_list,
+            "timestamp": timestamp,
+            "chunks_stored": chunks_stored,
+            "report_saved": bool(report_info.get("ok"))
+        }), 200
+
     except Exception as e:
-        current_app.logger.error("Report generation failed: %s", e)
+        current_app.logger.error(f"Error in audio transcription: {str(e)}")
+        # Clean up database entry on error
+        try:
+            current_app.supabase.table('audio_files').delete().eq("title", title).execute()
+        except Exception:
+            pass
+        return jsonify({"error": "Internal server error during transcription"}), 500
 
-    # Chunk transcript → embeddings
-    chunks = preprocess_and_chunk(transcript)
-    safe_namespace = sanitize_id(title)
-    chunks_stored = batch_embed_and_upsert(chunks, safe_namespace, batch_size=16)
-
-    return jsonify({
-        "title": title,
-        "description": description,
-        "members": members_list,
-        "timestamp": timestamp,
-        "chunks_stored": chunks_stored,
-        "report_saved": bool(report_info.get("ok"))
-    }), 200
+    finally:
+        # Always cleanup uploaded file
+        try:
+            if os.path.exists(filepath):
+                os.remove(filepath)
+        except Exception:
+            pass
 
 @transcribe_bp.route("/list-transcription", methods=["GET"])
 @token_required
@@ -350,25 +467,29 @@ def download_audio(url: str):
         return None, None
 
 
-def convert_and_compress_audio(input_audio_path: str):
-    """Convert to small MP3 for cheaper/faster transcription using imageio-ffmpeg."""
+def convert_and_compress_audio_optimized(input_audio_path: str):
+    """Optimized audio conversion with better compression and memory management."""
     if not input_audio_path or not os.path.exists(input_audio_path):
         return None
     output_audio_path = os.path.splitext(input_audio_path)[0] + ".mp3"
     try:
+        # More aggressive compression for better memory usage
         subprocess.run(
             [
-                imageio_ffmpeg.get_ffmpeg_exe(),  # ✅ use bundled ffmpeg
+                imageio_ffmpeg.get_ffmpeg_exe(),
                 "-y",
                 "-i", input_audio_path,
                 "-acodec", "libmp3lame",
-                "-ab", "64k",
-                "-ar", "22050",
+                "-ab", "32k",  # Reduced from 64k to 32k
+                "-ar", "16000",  # Reduced from 22050 to 16000
+                "-ac", "1",  # Convert to mono
+                "-af", "volume=0.8",  # Slight volume reduction
                 output_audio_path,
             ],
             check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            timeout=300,  # 5 minute timeout
         )
         if os.path.exists(output_audio_path):
             try:
@@ -377,7 +498,8 @@ def convert_and_compress_audio(input_audio_path: str):
                 pass
             return output_audio_path
         return None
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        current_app.logger.error(f"Audio conversion failed: {str(e)}")
         return None
     
 
@@ -421,7 +543,12 @@ def transcribe_video_and_store(user):
     if exists.data:
         return jsonify({"error": f"title '{title}' already exists"}), 409
 
+    # Check memory usage before starting
+    check_memory_usage()
+
     now_epoch = int(time.time())
+    tmp_mp3 = None
+    audio_path = None
 
     try:
         current_app.supabase.table("audio_files").insert({
@@ -434,19 +561,36 @@ def transcribe_video_and_store(user):
         current_app.logger.error("Supabase insert error: %s", e)
         return jsonify({"error": "Failed to insert record"}), 500
 
-    tmp_mp3 = None
     try:
+        current_app.logger.info(f"Starting video processing for: {title}")
+        
+        # Download audio from video
         audio_path, inferred_title = download_audio(video_url)
         if not audio_path:
+            # Clean up database entry if download failed
+            current_app.supabase.table('audio_files').delete().eq("title", title).execute()
             return jsonify({"error": "Audio download failed"}), 500
 
-        tmp_mp3 = convert_and_compress_audio(audio_path)
+        # Convert and compress audio
+        tmp_mp3 = convert_and_compress_audio_optimized(audio_path)
         if not tmp_mp3:
+            # Clean up database entry if conversion failed
+            current_app.supabase.table('audio_files').delete().eq("title", title).execute()
             return jsonify({"error": "Audio conversion/compression failed"}), 500
 
-        # ✅ Batch transcription
-        transcript = transcribe_large_audio(tmp_mp3)
+        # Clean up original audio file
+        try:
+            if audio_path and os.path.exists(audio_path):
+                os.remove(audio_path)
+        except Exception:
+            pass
+
+        # Optimized batch transcription
+        current_app.logger.info(f"Starting transcription for: {title}")
+        transcript = transcribe_large_audio_optimized(tmp_mp3)
         if not transcript:
+            # Clean up database entry if transcription failed
+            current_app.supabase.table('audio_files').delete().eq("title", title).execute()
             return jsonify({"error": "Transcription failed"}), 500
 
         # Report generation
@@ -456,27 +600,17 @@ def transcribe_video_and_store(user):
         except Exception as e:
             current_app.logger.error("Report generation failed: %s", e)
 
+        # Process embeddings
+        current_app.logger.info(f"Processing embeddings for: {title}")
         chunks = preprocess_and_chunk(transcript)
+        safe_namespace = sanitize_id(title)
+        chunks_stored = batch_embed_and_upsert_optimized(chunks, safe_namespace, batch_size=8)
 
-        def batch_embed_and_upsert(chunks_list, batch_size=16):
-            safe_namespace = sanitize_id(title)
-            total = 0
-            for i in range(0, len(chunks_list), batch_size):
-                batch_chunks = chunks_list[i:i + batch_size]
-                batch_embeds = current_app.embeddings.embed_documents(batch_chunks)
-                vectors = []
-                for j, (vec, chunk) in enumerate(zip(batch_embeds, batch_chunks)):
-                    vectors.append((
-                        f"{safe_namespace}_{i + j}",
-                        vec,
-                        {"text": chunk},
-                    ))
-                current_app.pinecone_index.upsert(vectors=vectors, namespace=safe_namespace)
-                total += len(vectors)
-            return total
+        # Final memory cleanup
+        del transcript, chunks
+        gc.collect()
 
-        chunks_stored = batch_embed_and_upsert(chunks, batch_size=16)
-
+        current_app.logger.info(f"Successfully completed video transcription for: {title}")
         return jsonify({
             "title": title,
             "description": description,
@@ -487,9 +621,24 @@ def transcribe_video_and_store(user):
             "report_saved": bool(report_info.get("ok"))
         }), 200
 
+    except Exception as e:
+        current_app.logger.error(f"Error in video transcription: {str(e)}")
+        # Clean up database entry on error
+        try:
+            current_app.supabase.table('audio_files').delete().eq("title", title).execute()
+        except Exception:
+            pass
+        return jsonify({"error": "Internal server error during video transcription"}), 500
+
     finally:
+        # Always cleanup temporary files
         try:
             if tmp_mp3 and os.path.exists(tmp_mp3):
                 os.remove(tmp_mp3)
+        except Exception:
+            pass
+        try:
+            if audio_path and os.path.exists(audio_path):
+                os.remove(audio_path)
         except Exception:
             pass
