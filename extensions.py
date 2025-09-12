@@ -35,7 +35,7 @@ def init_groq(app):
     
     app.groq = Groq(api_key=groq_key)
     print("NEW DEPLOY v2")
-    print("✓ GROQ client initialized successfully")
+    print("✓ GROQ client initialized successfully Updated one")
 
 def init_anthropic(app):
     if not Config.CLAUDE_API_KEY:

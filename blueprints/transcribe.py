@@ -294,7 +294,7 @@ def transcribe_and_store(user):
     members_raw = request.form.get("members")
     
     if not title or not description or not members_raw:
-        return jsonify({"error": "title, description, and members are required"}), 400
+        return jsonify({"error": "title, description, and members are required Updated one"}), 400
 
     members_list = [m.strip() for m in members_raw.split(",") if m.strip()]
     if not members_list:
@@ -326,7 +326,7 @@ def transcribe_and_store(user):
     filepath = os.path.join(temp_dir, filename)
     
     if not save_uploaded_file_streaming(audio_file, filepath):
-        return jsonify({"error": "Failed to save uploaded file"}), 500
+        return jsonify({"error": "Failed to save uploaded file Updated one"}), 500
 
     try:
         # Insert metadata into Supabase
@@ -358,7 +358,7 @@ def transcribe_and_store(user):
                 current_app.logger.error(f"Fallback transcription also failed: {str(e)}")
                 # Clean up database entry if transcription failed
                 current_app.supabase.table('audio_files').delete().eq("title", title).execute()
-                return jsonify({"error": f"Transcription failed: {str(e)}"}), 500
+                return jsonify({"error": f"Transcription failed: {str(e)} Updated one"}), 500
 
         # Report generation
         report_info = {}
@@ -377,7 +377,7 @@ def transcribe_and_store(user):
         del transcript, chunks
         gc.collect()
 
-        current_app.logger.info(f"Successfully completed transcription for: {title}")
+        current_app.logger.info(f"Successfully completed transcription for: {title} Updated one")
         return jsonify({
             "title": title,
             "description": description,

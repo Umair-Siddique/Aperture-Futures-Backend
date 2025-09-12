@@ -45,12 +45,12 @@ def create_app():
 
     @app.route("/")
     def index():
-        return {"status": "ok", "message": "Welcome to Aperture Futures Backend 🚀"}
+        return {"status": "ok", "message": "Welcome to Aperture Futures Backend Updated one🚀"}
 
     # ✅ Test route
     @app.route("/test")
     def test():
-        return {"status": "ok", "message": "Flask backend is running fine ✅"}
+        return {"status": "ok", "message": "Flask backend is running fine Updated one✅"}
     # Register BlueLines blueprints
     app.register_blueprint(bluelines_chat_bp, url_prefix="/bluelines/chat")
     app.register_blueprint(bluelines_retriever_bp, url_prefix="/bluelines/retriever")

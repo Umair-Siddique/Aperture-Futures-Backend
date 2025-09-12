@@ -29,7 +29,7 @@ def token_required(f):
     def decorated_function(*args, **kwargs):
         auth_header = request.headers.get('Authorization')
         if not auth_header or not auth_header.startswith('Bearer '):
-            return jsonify({'message': 'Authorization header is missing or invalid'}), 401
+            return jsonify({'message': 'Authorization header is missing or invalid Updated one'}), 401
         
         token = auth_header.split(' ')[1]
         try:
@@ -38,7 +38,7 @@ def token_required(f):
             # Make user object available to the route if needed
             kwargs['user'] = user_response.user
         except Exception as e:
-            return jsonify({'message': 'Token is invalid or expired', 'error': str(e)}), 401
+            return jsonify({'message': 'Token is invalid or expired Updated one', 'error': str(e)}), 401
         
         return f(*args, **kwargs)
     return decorated_function
@@ -127,7 +127,7 @@ def signin():
             role = "user"   # fallback if role not found
 
         return jsonify({
-            'message': f'Successfully signed in as {role}',
+            'message': f'Successfully signed in as {role} Updated one',
             'access_token': session_response.session.access_token,
             'user_id': user_id,
             'role': role
