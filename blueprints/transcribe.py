@@ -17,8 +17,6 @@ from openai import OpenAI
 from config import Config
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from .auth import token_required
-import librosa
-import soundfile as sf
 import imageio_ffmpeg
 from report.generate_report import generate_and_store_transcription_report
 import gc
@@ -26,6 +24,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import queue
 import psutil
+
 
 transcribe_bp = Blueprint('transcribe', __name__)
 
@@ -69,69 +68,33 @@ def save_uploaded_file_streaming(file_storage: FileStorage, target_path: str) ->
         current_app.logger.error(f"Error saving file: {str(e)}")
         return False
 
-def split_audio_into_chunks_optimized(input_path: str, max_size=None):
-    """Optimized audio chunking with memory management."""
-    current_app.logger.info(f"Starting audio chunking for: {input_path}")
-    
+def split_audio_into_chunks_ffmpeg(input_path, chunk_seconds=60):
+    """Chunk audio using ffmpeg instead of librosa."""
+    tmp_dir = tempfile.gettempdir()
+    chunks = []
     try:
-        # Check if input file exists
-        if not os.path.exists(input_path):
-            current_app.logger.error(f"Input file does not exist: {input_path}")
-            return []
-        
-        # Load audio with librosa using lower sample rate for memory efficiency
-        current_app.logger.info("Loading audio with librosa...")
-        audio, sr = librosa.load(input_path, sr=16000)  # Reduced sample rate
-        duration_samples = len(audio)
-        duration_seconds = duration_samples / sr
-        
-        current_app.logger.info(f"Audio loaded: {duration_seconds:.2f} seconds, {sr}Hz sample rate")
+        # Get duration using ffprobe
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries",
+             "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", input_path],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        )
+        duration = float(result.stdout.strip())
+        num_chunks = int(duration // chunk_seconds) + 1
 
-        chunks = []
-        start_sample = 0
-        chunk_count = 0
-        
-        while start_sample < duration_samples:
-            chunk_count += 1
-            # Use configurable chunk duration
-            chunk_duration_seconds = CHUNK_DURATION_SECONDS
-            end_sample = min(start_sample + int(chunk_duration_seconds * sr), duration_samples)
-            
-            # Extract chunk
-            chunk_audio = audio[start_sample:end_sample]
-            
-            # Save chunk to temporary file with compression
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmpf:
-                # Use lower bit depth for smaller file size
-                sf.write(tmpf.name, chunk_audio, sr, subtype='PCM_16')
-                size = os.path.getsize(tmpf.name)
-                
-                # Only check size limit if max_size is specified
-                if max_size and size > max_size and chunk_duration_seconds > 5:
-                    chunk_duration_seconds -= 5
-                    end_sample = start_sample + int(chunk_duration_seconds * sr)
-                    chunk_audio = audio[start_sample:end_sample]
-                    
-                    # Rewrite with smaller chunk
-                    sf.write(tmpf.name, chunk_audio, sr, subtype='PCM_16')
-                    size = os.path.getsize(tmpf.name)
-                
-                chunks.append(tmpf.name)
-                current_app.logger.info(f"Created chunk {chunk_count}: {size} bytes, {chunk_duration_seconds:.1f}s")
-                start_sample = end_sample
-
-        # Clear audio from memory
-        del audio
-        gc.collect()
-        
-        current_app.logger.info(f"Successfully created {len(chunks)} audio chunks")
+        for i in range(num_chunks):
+            start = i * chunk_seconds
+            out_path = os.path.join(tmp_dir, f"chunk_{i}_{uuid.uuid4().hex}.wav")
+            subprocess.run([
+                "ffmpeg", "-y", "-i", input_path,
+                "-ss", str(start), "-t", str(chunk_seconds),
+                "-ar", "16000", "-ac", "1", out_path
+            ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if os.path.exists(out_path):
+                chunks.append(out_path)
         return chunks
-        
     except Exception as e:
-        current_app.logger.error(f"Error splitting audio with librosa: {str(e)}")
-        current_app.logger.error(f"Error type: {type(e).__name__}")
-        import traceback
-        current_app.logger.error(f"Traceback: {traceback.format_exc()}")
+        current_app.logger.error(f"ffmpeg chunking failed: {e}")
         return []
 
 
@@ -196,7 +159,8 @@ def transcribe_large_audio_optimized(audio_path: str):
     
     try:
         # Removed MAX_FILE_SIZE limit - let system handle large files naturally
-        all_chunks = split_audio_into_chunks_optimized(audio_path, max_size=None)
+        all_chunks = split_audio_into_chunks_ffmpeg(audio_path, chunk_seconds=CHUNK_DURATION_SECONDS)
+
         if not all_chunks:
             current_app.logger.error("Failed to split audio into chunks")
             return ""
@@ -440,72 +404,7 @@ def transcribe_and_store(user):
         except Exception:
             pass
 
-@transcribe_bp.route("/health", methods=["GET"])
-def health_check():
-    """Health check endpoint to monitor system status."""
-    try:
-        memory_percent = psutil.virtual_memory().percent
-        return jsonify({
-            "status": "healthy",
-            "memory_usage_percent": memory_percent,
-            "max_upload_size_mb": "unlimited",  # Updated to reflect no limits
-            "timestamp": int(time.time())
-        }), 200
-    except Exception as e:
-        return jsonify({
-            "status": "unhealthy",
-            "error": str(e),
-            "timestamp": int(time.time())
-        }), 500
 
-@transcribe_bp.route("/test-transcription", methods=["POST"])
-@token_required
-def test_transcription(user):
-    """Test endpoint to debug transcription issues."""
-    try:
-        # Check if client is initialized
-        if not client:
-            return jsonify({
-                "status": "error",
-                "openai_working": False,
-                "error": "OpenAI client not initialized - check API key configuration",
-                "timestamp": int(time.time())
-            }), 500
-        
-        # Check if test file exists
-        test_file_path = "testing_audios/3431341.mp3"
-        if not os.path.exists(test_file_path):
-            return jsonify({
-                "status": "error",
-                "openai_working": False,
-                "error": f"Test file not found: {test_file_path}",
-                "timestamp": int(time.time())
-            }), 500
-        
-        # Test OpenAI API connection
-        with open(test_file_path, "rb") as f:
-            test_response = client.audio.transcriptions.create(
-                model="whisper-1",
-                file=f
-            )
-        
-        return jsonify({
-            "status": "success",
-            "openai_working": True,
-            "test_transcription_length": len(test_response.text) if test_response.text else 0,
-            "api_key_configured": bool(Config.OPENAI_API_KEY),
-            "timestamp": int(time.time())
-        }), 200
-        
-    except Exception as e:
-        return jsonify({
-            "status": "error",
-            "openai_working": False,
-            "error": str(e),
-            "error_type": type(e).__name__,
-            "api_key_configured": bool(Config.OPENAI_API_KEY),
-            "timestamp": int(time.time())
-        }), 500
 
 @transcribe_bp.route("/list-transcription", methods=["GET"])
 @token_required
