@@ -39,20 +39,20 @@ except Exception as e:
     client = None
 
 
-MAX_FILE_SIZE = 25 * 1024 * 1024  # 25 MB in bytes
-MAX_UPLOAD_SIZE = 100 * 1024 * 1024  # 100 MB max upload
+# Removed all file size and memory limits for production
+# MAX_FILE_SIZE = 25 * 1024 * 1024  # 25 MB in bytes - REMOVED
+# MAX_UPLOAD_SIZE = 100 * 1024 * 1024  # 100 MB max upload - REMOVED
 CHUNK_SIZE = 8192  # 8KB chunks for streaming
-CHUNK_DURATION_SECONDS = 30  # Reduced from 60 to 30 seconds for better memory management
-MAX_CONCURRENT_CHUNKS = 3  # Limit concurrent processing
-MEMORY_THRESHOLD_PERCENT = 80  # Memory usage threshold for cleanup
+CHUNK_DURATION_SECONDS = 60  # Increased back to 60 seconds for better performance
+MAX_CONCURRENT_CHUNKS = 10  # Increased concurrent processing for better performance
+# MEMORY_THRESHOLD_PERCENT = 80  # Memory usage threshold for cleanup - REMOVED
 
 def check_memory_usage():
     """Check current memory usage and trigger cleanup if needed."""
     memory_percent = psutil.virtual_memory().percent
-    if memory_percent > MEMORY_THRESHOLD_PERCENT:
-        current_app.logger.warning(f"High memory usage: {memory_percent}%")
-        gc.collect()
-        return True
+    # Removed memory threshold check - let system handle memory naturally
+    current_app.logger.info(f"Current memory usage: {memory_percent}%")
+    gc.collect()
     return False
 
 def save_uploaded_file_streaming(file_storage: FileStorage, target_path: str) -> bool:
@@ -69,7 +69,7 @@ def save_uploaded_file_streaming(file_storage: FileStorage, target_path: str) ->
         current_app.logger.error(f"Error saving file: {str(e)}")
         return False
 
-def split_audio_into_chunks_optimized(input_path: str, max_size=MAX_FILE_SIZE):
+def split_audio_into_chunks_optimized(input_path: str, max_size=None):
     """Optimized audio chunking with memory management."""
     current_app.logger.info(f"Starting audio chunking for: {input_path}")
     
@@ -93,7 +93,7 @@ def split_audio_into_chunks_optimized(input_path: str, max_size=MAX_FILE_SIZE):
         
         while start_sample < duration_samples:
             chunk_count += 1
-            # Start with smaller chunks for better memory management
+            # Use configurable chunk duration
             chunk_duration_seconds = CHUNK_DURATION_SECONDS
             end_sample = min(start_sample + int(chunk_duration_seconds * sr), duration_samples)
             
@@ -106,8 +106,8 @@ def split_audio_into_chunks_optimized(input_path: str, max_size=MAX_FILE_SIZE):
                 sf.write(tmpf.name, chunk_audio, sr, subtype='PCM_16')
                 size = os.path.getsize(tmpf.name)
                 
-                # If chunk is still too large, reduce duration progressively
-                while size > max_size and chunk_duration_seconds > 5:
+                # Only check size limit if max_size is specified
+                if max_size and size > max_size and chunk_duration_seconds > 5:
                     chunk_duration_seconds -= 5
                     end_sample = start_sample + int(chunk_duration_seconds * sr)
                     chunk_audio = audio[start_sample:end_sample]
@@ -195,7 +195,8 @@ def transcribe_large_audio_optimized(audio_path: str):
     current_app.logger.info(f"Input file size: {input_file_size} bytes")
     
     try:
-        all_chunks = split_audio_into_chunks_optimized(audio_path, MAX_FILE_SIZE)
+        # Removed MAX_FILE_SIZE limit - let system handle large files naturally
+        all_chunks = split_audio_into_chunks_optimized(audio_path, max_size=None)
         if not all_chunks:
             current_app.logger.error("Failed to split audio into chunks")
             return ""
@@ -343,13 +344,14 @@ def transcribe_and_store(user):
     if audio_file.filename == '':
         return jsonify({"error": "No audio file selected"}), 400
 
+    # Removed file size check - allow unlimited file sizes
     # Check file size before processing
-    audio_file.seek(0, 2)  # Seek to end
-    file_size = audio_file.tell()
-    audio_file.seek(0)  # Reset to beginning
+    # audio_file.seek(0, 2)  # Seek to end
+    # file_size = audio_file.tell()
+    # audio_file.seek(0)  # Reset to beginning
     
-    if file_size > MAX_UPLOAD_SIZE:
-        return jsonify({"error": f"File too large. Maximum size: {MAX_UPLOAD_SIZE // (1024*1024)}MB"}), 413
+    # if file_size > MAX_UPLOAD_SIZE:
+    #     return jsonify({"error": f"File too large. Maximum size: {MAX_UPLOAD_SIZE // (1024*1024)}MB"}), 413
 
     # Check memory usage before starting
     check_memory_usage()
@@ -446,7 +448,7 @@ def health_check():
         return jsonify({
             "status": "healthy",
             "memory_usage_percent": memory_percent,
-            "max_upload_size_mb": MAX_UPLOAD_SIZE // (1024 * 1024),
+            "max_upload_size_mb": "unlimited",  # Updated to reflect no limits
             "timestamp": int(time.time())
         }), 200
     except Exception as e:
@@ -540,7 +542,7 @@ def list_audio_files(user):
         resp = (
             current_app.supabase
                 .table("audio_files")
-                .select("title, description, timestamp", count="exact")  # 👈 include description
+                .select("title, description, timestamp", count="exact")  #  include description
                 .order("timestamp", desc=True)
                 .order("title", desc=True)  # tie-breaker for stable ordering
                 .range(start, end)
@@ -610,7 +612,8 @@ def delete_transcription(user):
 def find_stream_url_from_un(page_url: str):
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
-        resp = requests.get(page_url, headers=headers, timeout=20)
+        # Removed timeout limit for production
+        resp = requests.get(page_url, headers=headers, timeout=None)
         resp.raise_for_status()
         html = resp.text
 
@@ -686,7 +689,8 @@ def convert_and_compress_audio_optimized(input_audio_path: str):
             check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            timeout=300,  # 5 minute timeout
+            # Removed timeout limit for production
+            timeout=None,
         )
         if os.path.exists(output_audio_path):
             try:

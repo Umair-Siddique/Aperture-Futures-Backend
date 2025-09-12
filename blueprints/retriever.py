@@ -275,7 +275,7 @@ Denmark underscored the importance of ensuring safe humanitarian operations.
         assistant_text = ""
         try:
             stream = client.chat.completions.create(
-                model="gpt-4.1",
+                model="gpt-4",  # Change this line - gpt-4.1 doesn't exist
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
@@ -300,7 +300,7 @@ Denmark underscored the importance of ensuring safe humanitarian operations.
 
                 if delta:
                     assistant_text += delta
-                    yield delta
+                    yield delta  # This will stream each character/token as it comes
 
         except Exception as e:
             err_md = f"\n\n> **Streaming error:** `{str(e)}`\n"
