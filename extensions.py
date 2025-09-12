@@ -34,6 +34,7 @@ def init_groq(app):
         raise ValueError("GROQ_API_KEY not found in Supabase or environment variables.")
     
     app.groq = Groq(api_key=groq_key)
+    print("NEW DEPLOY v2")
     print("✓ GROQ client initialized successfully")
 
 def init_anthropic(app):
