@@ -275,7 +275,7 @@ Denmark underscored the importance of ensuring safe humanitarian operations.
         assistant_text = ""
         try:
             stream = client.chat.completions.create(
-                model="gpt-4",  # Change this line - gpt-4.1 doesn't exist
+                model="gpt-4o",  # Change this line - gpt-4.1 doesn't exist
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
