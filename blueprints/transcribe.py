@@ -24,7 +24,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import queue
 import psutil
-
+import logging
 
 transcribe_bp = Blueprint('transcribe', __name__)
 
@@ -38,13 +38,9 @@ except Exception as e:
     client = None
 
 
-# Removed all file size and memory limits for production
-# MAX_FILE_SIZE = 25 * 1024 * 1024  # 25 MB in bytes - REMOVED
-# MAX_UPLOAD_SIZE = 100 * 1024 * 1024  # 100 MB max upload - REMOVED
 CHUNK_SIZE = 8192  # 8KB chunks for streaming
-CHUNK_DURATION_SECONDS = 60  # Increased back to 60 seconds for better performance
-MAX_CONCURRENT_CHUNKS = 10  # Increased concurrent processing for better performance
-# MEMORY_THRESHOLD_PERCENT = 80  # Memory usage threshold for cleanup - REMOVED
+CHUNK_DURATION_SECONDS = 60   # 1 minute chunks
+MAX_CONCURRENT_CHUNKS = 10     # threads
 
 def check_memory_usage():
     """Check current memory usage and trigger cleanup if needed."""
@@ -68,34 +64,21 @@ def save_uploaded_file_streaming(file_storage: FileStorage, target_path: str) ->
         current_app.logger.error(f"Error saving file: {str(e)}")
         return False
 
-def split_audio_into_chunks_ffmpeg(input_path, chunk_seconds=60):
-    """Chunk audio using ffmpeg instead of librosa."""
-    tmp_dir = tempfile.gettempdir()
-    chunks = []
-    try:
-        # Get duration using ffprobe
-        result = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries",
-             "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", input_path],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-        )
-        duration = float(result.stdout.strip())
-        num_chunks = int(duration // chunk_seconds) + 1
+def split_audio_into_chunks_ffmpeg(audio_path, output_dir="chunks", chunk_length=30):
+    os.makedirs(output_dir, exist_ok=True)
 
-        for i in range(num_chunks):
-            start = i * chunk_seconds
-            out_path = os.path.join(tmp_dir, f"chunk_{i}_{uuid.uuid4().hex}.wav")
-            subprocess.run([
-                "ffmpeg", "-y", "-i", input_path,
-                "-ss", str(start), "-t", str(chunk_seconds),
-                "-ar", "16000", "-ac", "1", out_path
-            ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            if os.path.exists(out_path):
-                chunks.append(out_path)
-        return chunks
+    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()  # ✅ points to the bundled ffmpeg.exe
+    try:
+        subprocess.run([
+            ffmpeg_exe, "-i", audio_path,
+            "-f", "segment", "-segment_time", str(chunk_length),
+            "-c", "copy", os.path.join(output_dir, "chunk_%03d.wav")
+        ], check=True)
     except Exception as e:
-        current_app.logger.error(f"ffmpeg chunking failed: {e}")
+        print(f"[ERROR] ffmpeg chunking failed: {e}")
         return []
+
+    return [os.path.join(output_dir, f) for f in os.listdir(output_dir) if f.endswith(".wav")]
 
 
 def transcribe_audio_with_openai(audio_path: str):
@@ -159,7 +142,7 @@ def transcribe_large_audio_optimized(audio_path: str):
     
     try:
         # Removed MAX_FILE_SIZE limit - let system handle large files naturally
-        all_chunks = split_audio_into_chunks_ffmpeg(audio_path, chunk_seconds=CHUNK_DURATION_SECONDS)
+        all_chunks = split_audio_into_chunks_ffmpeg(audio_path, chunk_length=CHUNK_DURATION_SECONDS)
 
         if not all_chunks:
             current_app.logger.error("Failed to split audio into chunks")
@@ -504,6 +487,71 @@ def delete_transcription(user):
     except Exception as e:
         current_app.logger.error("Delete error: %s", e)
         return jsonify({"error": "Failed to delete transcription"}), 500
+
+
+# --------------------------------------------Test-----------------------------------------
+@transcribe_bp.route("/simple", methods=["POST"])
+def simple_transcription():
+    """
+    Minimal transcription API:
+    - Accepts 'audio' file
+    - Splits into chunks if large
+    - Runs Whisper transcription concurrently
+    - Returns combined transcript in JSON
+    """
+    if "audio" not in request.files:
+        return jsonify({"error": "No audio file provided"}), 400
+
+    audio_file = request.files["audio"]
+    if audio_file.filename == "":
+        return jsonify({"error": "No audio file selected"}), 400
+
+    # Save to temp
+    filename = f"{uuid.uuid4().hex}_{secure_filename(audio_file.filename)}"
+    temp_dir = tempfile.gettempdir()
+    filepath = os.path.join(temp_dir, filename)
+    audio_file.save(filepath)
+
+    def run_transcription(path):
+        try:
+            chunks = split_audio_into_chunks_ffmpeg(path, chunk_length=CHUNK_DURATION_SECONDS)
+            transcripts = []
+
+            if not chunks:
+                logging.error("No chunks created from audio")
+                return ""
+
+            with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_CHUNKS) as executor:
+                futures = {executor.submit(transcribe_audio_with_openai, c): c for c in chunks}
+                for future in as_completed(futures):
+                    chunk_path = futures[future]
+                    try:
+                        text = future.result()
+                        if text:
+                            transcripts.append(text)
+                    except Exception as e:
+                        logging.error(f"Chunk transcription failed: {e}")
+                    finally:
+                        try:
+                            os.remove(chunk_path)
+                        except Exception:
+                            pass
+
+            final_text = " ".join(transcripts).strip()
+            return final_text
+        finally:
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+
+    # Run synchronously for now (still threaded internally for chunks)
+    transcript = run_transcription(filepath)
+
+    if not transcript:
+        return jsonify({"error": "Transcription failed"}), 500
+
+    return jsonify({"transcript": transcript}), 200
 
 
 
