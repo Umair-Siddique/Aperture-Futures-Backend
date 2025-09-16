@@ -734,6 +734,9 @@ def transcribe_video_and_store(user):
             pass
 
         # Optimized batch transcription
+# ... existing code ...
+
+        # Optimized batch transcription
         current_app.logger.info(f"Starting transcription for: {title}")
         transcript = transcribe_large_audio_optimized(tmp_mp3)
         if not transcript:
@@ -741,10 +744,11 @@ def transcribe_video_and_store(user):
             current_app.supabase.table('audio_files').delete().eq("title", title).execute()
             return jsonify({"error": "Transcription failed"}), 500
 
-        # Report generation
+        # Report generation - directly added
         report_info = {}
         try:
             report_info = generate_and_store_transcription_report(title=title, transcript=transcript)
+            current_app.logger.info(f"Report generation completed for: {title}")
         except Exception as e:
             current_app.logger.error("Report generation failed: %s", e)
 
@@ -753,6 +757,8 @@ def transcribe_video_and_store(user):
         chunks = preprocess_and_chunk(transcript)
         safe_namespace = sanitize_id(title)
         chunks_stored = batch_embed_and_upsert_optimized(chunks, safe_namespace, batch_size=8)
+
+# ... existing code ...
 
         # Final memory cleanup
         del transcript, chunks

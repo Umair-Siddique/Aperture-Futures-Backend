@@ -23,7 +23,7 @@ def create_app():
     # app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100 MB max file size - REMOVED
     app.config['UPLOAD_FOLDER'] = tempfile.gettempdir()
 
-    CORS(app, supports_credentials=True, origins=['http://localhost:5173','https://blue-lines-life-lines-rag.vercel.app', 'https://aperture-futures-frontend-fcis.vercel.app'])
+    CORS(app, supports_credentials=True, origins=['http://localhost:5173','https://blue-lines-life-lines-rag.vercel.app', 'https://aperture-futures-frontend-fcis.vercel.app', 'https://aperturefutures.com'])
 
     # Initialize LifeLines extensions
     init_supabase(app)
@@ -43,14 +43,7 @@ def create_app():
     app.register_blueprint(retriever_bp, url_prefix="/retriever")
     app.register_blueprint(report_bp, url_prefix="/report")
 
-    @app.route("/")
-    def index():
-        return {"status": "ok", "message": "Welcome to Aperture Futures Backend Updated one🚀"}
 
-    # ✅ Test route
-    @app.route("/test")
-    def test():
-        return {"status": "ok", "message": "Flask backend is running fine Updated one✅"}
     # Register BlueLines blueprints
     app.register_blueprint(bluelines_chat_bp, url_prefix="/bluelines/chat")
     app.register_blueprint(bluelines_retriever_bp, url_prefix="/bluelines/retriever")
