@@ -601,8 +601,9 @@ def download_audio(url: str):
         "nocheckcertificate": True,
         "quiet": True,
         "outtmpl": outtmpl,
-        # ✅ no need to set "downloader": "ffmpeg" explicitly
         "hls_use_mpegts": True,
+        # ✅ Force yt_dlp to use bundled ffmpeg from imageio
+        "ffmpeg_location": os.path.dirname(imageio_ffmpeg.get_ffmpeg_exe()),
     }
 
     try:
@@ -610,8 +611,10 @@ def download_audio(url: str):
             info = ydl.extract_info(final_url, download=True)
             audio_path = ydl.prepare_filename(info)  # actual downloaded file path
         return (audio_path if os.path.exists(audio_path) else None), video_title
-    except Exception:
+    except Exception as e:
+        current_app.logger.error(f"yt_dlp download error: {e}")
         return None, None
+
 
 
 def convert_and_compress_audio_optimized(input_audio_path: str):
