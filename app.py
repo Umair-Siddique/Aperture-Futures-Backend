@@ -23,7 +23,14 @@ def create_app():
     # app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100 MB max file size - REMOVED
     app.config['UPLOAD_FOLDER'] = tempfile.gettempdir()
 
-    CORS(app, supports_credentials=True, origins=['http://localhost:5173','https://blue-lines-life-lines-rag.vercel.app', 'https://aperture-futures-frontend-fcis.vercel.app', 'https://aperturefutures.com','https://www.aperturefutures.com'])
+    # Allow all origins with comprehensive settings
+    CORS(app, 
+         supports_credentials=True, 
+         origins="*",
+         methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+         allow_headers=['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
+         expose_headers=['Content-Type', 'Authorization']
+    )
 
     # Initialize LifeLines extensions
     init_supabase(app)
