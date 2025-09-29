@@ -1,8 +1,14 @@
 # celery_app.py
 import os
+import sys
 from celery import Celery
 from config import Config
 import ssl
+
+# Add current directory to Python path for Render deployment
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.insert(0, current_dir)
 
 def make_celery():
     broker = Config.CELERY_BROKER_URL
@@ -45,6 +51,9 @@ def make_celery():
         
         # Better error handling
         'task_reject_on_worker_lost': True,
+        
+        # Ensure tasks are properly imported
+        'imports': ['tasks.transcribe_tasks'],
     }
 
     # Add SSL configuration only for rediss:// URLs
@@ -59,6 +68,24 @@ def make_celery():
         }
 
     app.conf.update(config)
+    
+    # Force import of tasks module to ensure registration
+    try:
+        import tasks.transcribe_tasks
+        print("Successfully imported tasks.transcribe_tasks")
+    except Exception as e:
+        print(f"Error importing tasks: {e}")
+        # Try alternative import
+        try:
+            from tasks import transcribe_tasks
+            print("Successfully imported with alternative method")
+        except Exception as e2:
+            print(f"Alternative import also failed: {e2}")
+    
     return app
 
 celery_app = make_celery()
+
+# Force task registration
+if hasattr(celery_app, 'tasks'):
+    print(f"Registered tasks: {list(celery_app.tasks.keys())}")
