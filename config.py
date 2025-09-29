@@ -17,6 +17,8 @@ class Config:
     MEETING_TRANSCRIPTS_INDEX = os.getenv("MEETING_TRANSCRIPTS_INDEX")
     PINECONE_HOST = os.getenv('PINECONE_HOST')
     GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+    CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL')
+    CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND')
 
     # SMTP / Email settings
     SMTP_HOST = os.getenv("SMTP_HOST", "smtp.protonmail.ch")

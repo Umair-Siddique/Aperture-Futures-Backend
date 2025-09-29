@@ -24,3 +24,5 @@ imageio-ffmpeg
 librosa
 soundfile
 psutil
+celery
+redis

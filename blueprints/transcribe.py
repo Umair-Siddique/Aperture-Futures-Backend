@@ -11,7 +11,6 @@ import subprocess
 import requests
 import yt_dlp as youtube_dl
 from urllib.parse import urlparse
-from datetime import datetime
 from math import ceil
 from openai import OpenAI
 from config import Config
@@ -20,11 +19,25 @@ from .auth import token_required
 import imageio_ffmpeg
 from report.generate_report import generate_and_store_transcription_report
 import gc
-import threading
+from tasks.transcribe_tasks import transcribe_audio_task
+from celery.result import AsyncResult
+from celery_app import celery_app
+
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import queue
+
 import psutil
 import logging
+
+# Import shared utilities
+from transcription_utils import (
+    transcribe_large_audio_optimized,
+    transcribe_audio_with_openai,
+    preprocess_and_chunk,
+    sanitize_id,
+    batch_embed_and_upsert_optimized,
+    download_audio,
+    convert_and_compress_audio_optimized
+)
 
 transcribe_bp = Blueprint('transcribe', __name__)
 
@@ -64,329 +77,99 @@ def save_uploaded_file_streaming(file_storage: FileStorage, target_path: str) ->
         current_app.logger.error(f"Error saving file: {str(e)}")
         return False
 
-def split_audio_into_chunks_ffmpeg(audio_path, output_dir="chunks", chunk_length=30):
-    os.makedirs(output_dir, exist_ok=True)
-
-    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()  # ✅ points to the bundled ffmpeg.exe
-    try:
-        subprocess.run([
-            ffmpeg_exe, "-i", audio_path,
-            "-f", "segment", "-segment_time", str(chunk_length),
-            "-c", "copy", os.path.join(output_dir, "chunk_%03d.wav")
-        ], check=True)
-    except Exception as e:
-        print(f"[ERROR] ffmpeg chunking failed: {e}")
-        return []
-
-    return [os.path.join(output_dir, f) for f in os.listdir(output_dir) if f.endswith(".wav")]
-
-
-def transcribe_audio_with_openai(audio_path: str):
-    """Send audio to OpenAI Whisper for transcription with retry logic."""
-    max_retries = 3
-    current_app.logger.info(f"Starting transcription for file: {audio_path}")
-    
-    # Check if OpenAI client is available
-    if not client:
-        current_app.logger.error("OpenAI client not initialized - check API key")
-        return ""
-    
-    # Check if file exists and get size
-    if not os.path.exists(audio_path):
-        current_app.logger.error(f"Audio file does not exist: {audio_path}")
-        return ""
-    
-    file_size = os.path.getsize(audio_path)
-    current_app.logger.info(f"Audio file size: {file_size} bytes")
-    
-    for attempt in range(max_retries):
-        try:
-            current_app.logger.info(f"Transcription attempt {attempt + 1}/{max_retries}")
-            with open(audio_path, "rb") as f:
-                transcript = client.audio.transcriptions.create(
-                    model="whisper-1",  # Use whisper-1 for better performance
-                    file=f
-                )
-            
-            if transcript and transcript.text:
-                current_app.logger.info(f"Transcription successful, text length: {len(transcript.text)}")
-                return transcript.text
-            else:
-                current_app.logger.warning(f"Transcription returned empty result for {audio_path}")
-                return ""
-                
-        except Exception as e:
-            error_msg = f"Transcription attempt {attempt + 1} failed: {str(e)}"
-            current_app.logger.error(error_msg)
-            current_app.logger.error(f"Error type: {type(e).__name__}")
-            
-            if attempt == max_retries - 1:
-                current_app.logger.error(f"All transcription attempts failed for {audio_path}")
-                return ""
-            time.sleep(2)  # Wait before retry
-    
-    return ""
-
-
-def transcribe_large_audio_optimized(audio_path: str):
-    """Optimized large audio transcription with concurrent processing and memory management."""
-    current_app.logger.info(f"Starting large audio transcription for: {audio_path}")
-    
-    # Check if input file exists
-    if not os.path.exists(audio_path):
-        current_app.logger.error(f"Input audio file does not exist: {audio_path}")
-        return ""
-    
-    input_file_size = os.path.getsize(audio_path)
-    current_app.logger.info(f"Input file size: {input_file_size} bytes")
-    
-    try:
-        # Removed MAX_FILE_SIZE limit - let system handle large files naturally
-        all_chunks = split_audio_into_chunks_ffmpeg(audio_path, chunk_length=CHUNK_DURATION_SECONDS)
-
-        if not all_chunks:
-            current_app.logger.error("Failed to split audio into chunks")
-            return ""
-        
-        transcripts = []
-        total_chunks = len(all_chunks)
-        current_app.logger.info(f"Successfully created {total_chunks} audio chunks")
-        
-        # Process chunks in batches to manage memory
-        for i in range(0, len(all_chunks), MAX_CONCURRENT_CHUNKS):
-            batch_chunks = all_chunks[i:i + MAX_CONCURRENT_CHUNKS]
-            batch_num = i // MAX_CONCURRENT_CHUNKS + 1
-            total_batches = (total_chunks + MAX_CONCURRENT_CHUNKS - 1) // MAX_CONCURRENT_CHUNKS
-            
-            current_app.logger.info(f"Processing batch {batch_num}/{total_batches} with {len(batch_chunks)} chunks")
-            
-            # Check memory usage before processing batch
-            check_memory_usage()
-            
-            # Use ThreadPoolExecutor for concurrent processing
-            with ThreadPoolExecutor(max_workers=min(len(batch_chunks), MAX_CONCURRENT_CHUNKS)) as executor:
-                # Submit transcription tasks
-                future_to_chunk = {
-                    executor.submit(transcribe_audio_with_openai, chunk_path): chunk_path 
-                    for chunk_path in batch_chunks
-                }
-                
-                # Collect results as they complete
-                for future in as_completed(future_to_chunk):
-                    chunk_path = future_to_chunk[future]
-                    try:
-                        text = future.result()
-                        if text:
-                            transcripts.append(text)
-                            current_app.logger.info(f"Successfully transcribed chunk: {chunk_path}")
-                        else:
-                            current_app.logger.warning(f"Empty transcription for chunk: {chunk_path}")
-                    except Exception as e:
-                        current_app.logger.error(f"Error transcribing chunk {chunk_path}: {str(e)}")
-                    finally:
-                        # Cleanup chunk file
-                        try:
-                            os.remove(chunk_path)
-                        except Exception as e:
-                            current_app.logger.warning(f"Failed to cleanup chunk file {chunk_path}: {str(e)}")
-            
-            # Force garbage collection after each batch
-            gc.collect()
-            
-            # Check memory usage after processing batch
-            check_memory_usage()
-        
-        final_transcript = " ".join(transcripts)
-        current_app.logger.info(f"Completed transcription of {total_chunks} chunks, final text length: {len(final_transcript)}")
-        
-        if not final_transcript.strip():
-            current_app.logger.error("Final transcript is empty")
-            return ""
-            
-        return final_transcript
-        
-    except Exception as e:
-        current_app.logger.error(f"Error in transcribe_large_audio_optimized: {str(e)}")
-        current_app.logger.error(f"Error type: {type(e).__name__}")
-        import traceback
-        current_app.logger.error(f"Traceback: {traceback.format_exc()}")
-        return ""
-
-
-# Helper: Chunk Text Using RecursiveCharacterTextSplitter
-def preprocess_and_chunk(text):
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=2500,
-        chunk_overlap=250,
-        separators=["\n\n", "\n", ".", " ", ""]
-    )
-    return text_splitter.split_text(text)
-
-
-def sanitize_id(name: str) -> str:
-    """Sanitize string for Pinecone namespace/vector IDs (ASCII only)."""
-    normalized = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
-    sanitized = re.sub(r'[^a-zA-Z0-9_-]', '_', normalized)
-    return sanitized.lower()
-
-
-def batch_embed_and_upsert_optimized(chunks, safe_namespace, batch_size=8):
-    """Optimized embedding and upsert with memory management."""
-    total_chunks = len(chunks)
-    total_vectors = 0
-    
-    # Process in smaller batches to reduce memory usage
-    for i in range(0, total_chunks, batch_size):
-        batch_chunks = chunks[i:i+batch_size]
-        
-        try:
-            # Generate embeddings for this batch
-            batch_embeds = current_app.embeddings.embed_documents(batch_chunks)
-            
-            # Create vectors for this batch
-            vectors = [
-                (
-                    f"{safe_namespace}_{i+j}",
-                    vec,
-                    {"text": chunk}
-                )
-                for j, (vec, chunk) in enumerate(zip(batch_embeds, batch_chunks))
-            ]
-            
-            # Upsert this batch
-            current_app.pinecone_index.upsert(vectors=vectors, namespace=safe_namespace)
-            total_vectors += len(vectors)
-            
-            # Clear batch data from memory
-            del batch_embeds, vectors
-            gc.collect()
-            
-        except Exception as e:
-            current_app.logger.error(f"Error processing embedding batch {i//batch_size + 1}: {str(e)}")
-            continue
-    
-    return total_vectors
-
-
 @transcribe_bp.route("/audio", methods=["POST"])
 @token_required
 def transcribe_and_store(user):
-    # Get form data first (before file processing)
     title = request.form.get("title")
     description = request.form.get("description")
     members_raw = request.form.get("members")
-    
+
     if not title or not description or not members_raw:
-        return jsonify({"error": "title, description, and members are required Updated one"}), 400
+        return jsonify({"error": "title, description, and members are required"}), 400
 
     members_list = [m.strip() for m in members_raw.split(",") if m.strip()]
     if not members_list:
         return jsonify({"error": "members cannot be empty"}), 400
 
-    # Check for file in request
-    if 'audio' not in request.files:
+    if "audio" not in request.files:
         return jsonify({"error": "No audio file provided"}), 400
-    
-    audio_file = request.files['audio']
-    if audio_file.filename == '':
+
+    audio_file = request.files["audio"]
+    if audio_file.filename == "":
         return jsonify({"error": "No audio file selected"}), 400
 
-    # Removed file size check - allow unlimited file sizes
-    # Check file size before processing
-    # audio_file.seek(0, 2)  # Seek to end
-    # file_size = audio_file.tell()
-    # audio_file.seek(0)  # Reset to beginning
-    
-    # if file_size > MAX_UPLOAD_SIZE:
-    #     return jsonify({"error": f"File too large. Maximum size: {MAX_UPLOAD_SIZE // (1024*1024)}MB"}), 413
-
-    # Check memory usage before starting
-    check_memory_usage()
-
-    # Save uploaded file using streaming
     filename = f"{uuid.uuid4().hex}_{secure_filename(audio_file.filename)}"
     temp_dir = tempfile.gettempdir()
     filepath = os.path.join(temp_dir, filename)
-    
-    if not save_uploaded_file_streaming(audio_file, filepath):
-        return jsonify({"error": "Failed to save uploaded file Updated one"}), 500
+    audio_file.save(filepath)
 
+    # enqueue Celery task
+    task = transcribe_audio_task.delay(title, description, members_list, filepath)
+
+    return jsonify({"task_id": task.id}), 202, {"Location": f"/tasks/{task.id}"}
+
+@transcribe_bp.route("/tasks/<task_id>", methods=["GET"])
+@token_required  # Add authentication
+def task_status(user, task_id):
+    """Get the status of a background transcription task."""
     try:
-        # Insert metadata into Supabase
-        timestamp = int(time.time())
-        current_app.supabase.table('audio_files').insert({
-            "title": title,
-            "description": description,
-            "members": members_list,
-            "timestamp": timestamp
-        }).execute()
-
-        # Transcribe large file safely with optimized processing
-        current_app.logger.info(f"Starting transcription for: {title}")
-        transcript = transcribe_large_audio_optimized(filepath)
-
-        if not transcript:
-            current_app.logger.warning("Optimized transcription failed, trying fallback method...")
-            # Try fallback method - direct transcription without chunking
-            try:
-                transcript = transcribe_audio_with_openai(filepath)
-                if not transcript:
-                    current_app.logger.error("Both optimized and fallback transcription failed")
-                    # Clean up database entry if transcription failed
-                    current_app.supabase.table('audio_files').delete().eq("title", title).execute()
-                    return jsonify({"error": "Transcription failed - both optimized and fallback methods failed"}), 500
-                else:
-                    current_app.logger.info("Fallback transcription successful")
-            except Exception as e:
-                current_app.logger.error(f"Fallback transcription also failed: {str(e)}")
-                # Clean up database entry if transcription failed
-                current_app.supabase.table('audio_files').delete().eq("title", title).execute()
-                return jsonify({"error": f"Transcription failed: {str(e)} Updated one"}), 500
-
-        # Report generation
-        report_info = {}
-        try:
-            report_info = generate_and_store_transcription_report(title=title, transcript=transcript)
-        except Exception as e:
-            current_app.logger.error("Report generation failed: %s", e)
-
-        # Chunk transcript → embeddings with optimized processing
-        current_app.logger.info(f"Processing embeddings for: {title}")
-        chunks = preprocess_and_chunk(transcript)
-        safe_namespace = sanitize_id(title)
-        chunks_stored = batch_embed_and_upsert_optimized(chunks, safe_namespace, batch_size=8)
-
-        # Final memory cleanup
-        del transcript, chunks
-        gc.collect()
-
-        current_app.logger.info(f"Successfully completed transcription for: {title} Updated one")
-        return jsonify({
-            "title": title,
-            "description": description,
-            "members": members_list,
-            "timestamp": timestamp,
-            "chunks_stored": chunks_stored,
-            "report_saved": bool(report_info.get("ok"))
-        }), 200
-
+        result = AsyncResult(task_id, app=celery_app)
+        
+        if result.state == 'PENDING':
+            # Task is waiting to be processed
+            response = {
+                'id': task_id,
+                'state': result.state,
+                'current': 0,
+                'total': 100,
+                'status': 'Task is waiting to be processed...'
+            }
+        elif result.state == 'PROGRESS':
+            # Task is currently being processed
+            response = {
+                'id': task_id,
+                'state': result.state,
+                'current': result.info.get('current', 0),
+                'total': result.info.get('total', 100),
+                'status': result.info.get('status', 'Processing...')
+            }
+        elif result.state == 'SUCCESS':
+            # Task completed successfully
+            response = {
+                'id': task_id,
+                'state': result.state,
+                'current': 100,
+                'total': 100,
+                'status': 'Task completed successfully',
+                'result': result.result
+            }
+        elif result.state == 'FAILURE':
+            # Task failed
+            response = {
+                'id': task_id,
+                'state': result.state,
+                'current': 0,
+                'total': 100,
+                'status': 'Task failed',
+                'error': str(result.info.get('error', 'Unknown error'))
+            }
+        else:
+            # Unknown state
+            response = {
+                'id': task_id,
+                'state': result.state,
+                'status': f'Unknown task state: {result.state}'
+            }
+        
+        return jsonify(response), 200
+        
     except Exception as e:
-        current_app.logger.error(f"Error in audio transcription: {str(e)}")
-        # Clean up database entry on error
-        try:
-            current_app.supabase.table('audio_files').delete().eq("title", title).execute()
-        except Exception:
-            pass
-        return jsonify({"error": "Internal server error during transcription"}), 500
-
-    finally:
-        # Always cleanup uploaded file
-        try:
-            if os.path.exists(filepath):
-                os.remove(filepath)
-        except Exception:
-            pass
-
+        current_app.logger.error(f"Error checking task status: {str(e)}")
+        return jsonify({
+            'id': task_id,
+            'state': 'ERROR',
+            'error': 'Failed to check task status'
+        }), 500
 
 
 @transcribe_bp.route("/list-transcription", methods=["GET"])
@@ -489,187 +272,8 @@ def delete_transcription(user):
         return jsonify({"error": "Failed to delete transcription"}), 500
 
 
-# --------------------------------------------Test-----------------------------------------
-@transcribe_bp.route("/simple", methods=["POST"])
-def simple_transcription():
-    """
-    Minimal transcription API:
-    - Accepts 'audio' file
-    - Splits into chunks if large
-    - Runs Whisper transcription concurrently
-    - Returns combined transcript in JSON
-    """
-    if "audio" not in request.files:
-        return jsonify({"error": "No audio file provided"}), 400
-
-    audio_file = request.files["audio"]
-    if audio_file.filename == "":
-        return jsonify({"error": "No audio file selected"}), 400
-
-    # Save to temp
-    filename = f"{uuid.uuid4().hex}_{secure_filename(audio_file.filename)}"
-    temp_dir = tempfile.gettempdir()
-    filepath = os.path.join(temp_dir, filename)
-    audio_file.save(filepath)
-
-    def run_transcription(path):
-        try:
-            chunks = split_audio_into_chunks_ffmpeg(path, chunk_length=CHUNK_DURATION_SECONDS)
-            transcripts = []
-
-            if not chunks:
-                logging.error("No chunks created from audio")
-                return ""
-
-            with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_CHUNKS) as executor:
-                futures = {executor.submit(transcribe_audio_with_openai, c): c for c in chunks}
-                for future in as_completed(futures):
-                    chunk_path = futures[future]
-                    try:
-                        text = future.result()
-                        if text:
-                            transcripts.append(text)
-                    except Exception as e:
-                        logging.error(f"Chunk transcription failed: {e}")
-                    finally:
-                        try:
-                            os.remove(chunk_path)
-                        except Exception:
-                            pass
-
-            final_text = " ".join(transcripts).strip()
-            return final_text
-        finally:
-            try:
-                os.remove(path)
-            except Exception:
-                pass
-
-    # Run synchronously for now (still threaded internally for chunks)
-    transcript = run_transcription(filepath)
-
-    if not transcript:
-        return jsonify({"error": "Transcription failed"}), 500
-
-    return jsonify({"transcript": transcript}), 200
-
-
 
 # -------------------- /video Endpoint --------------------
-def find_stream_url_from_un(page_url: str):
-    try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        # Removed timeout limit for production
-        resp = requests.get(page_url, headers=headers, timeout=None)
-        resp.raise_for_status()
-        html = resp.text
-
-        kaltura_pattern = r"(https://cdnapisec\.kaltura\.com/p/[\w/]+/playManifest/entryId/([\w_]+)/.*?\.m3u8\?[\w=&:;-]+)"
-        m = re.search(kaltura_pattern, html)
-        if m:
-            return m.group(1), f"un_video_{m.group(2)}"
-
-        jw_pattern = r"https://cdn\.jwplayer\.com/manifests/(\w+)\.m3u8"
-        m = re.search(jw_pattern, html)
-        if m:
-            return m.group(0), f"un_video_{m.group(1)}"
-
-        return None, None
-    except requests.exceptions.RequestException:
-        return None, None
-
-
-def download_audio(url: str):
-    """Download best audio track to temp dir via yt_dlp; returns (path, title)."""
-    final_url = url
-    video_title = "video_audio"
-
-    if "webtv.un.org" in url:
-        stream_url, generated_title = find_stream_url_from_un(url)
-        if not stream_url:
-            return None, None
-        final_url = stream_url
-        video_title = generated_title
-
-    tmpdir = tempfile.gettempdir()
-    unique = uuid.uuid4().hex
-    sanitized_title = sanitize_id(video_title)
-    outtmpl = os.path.join(tmpdir, f"{unique}_{sanitized_title}.%(ext)s")
-
-    ydl_opts = {
-        "format": "bestaudio/best",
-        "nocheckcertificate": True,
-        "quiet": True,
-        "outtmpl": outtmpl,
-        "hls_use_mpegts": True,
-        # ✅ Force yt_dlp to use bundled ffmpeg from imageio
-        "ffmpeg_location": os.path.dirname(imageio_ffmpeg.get_ffmpeg_exe()),
-    }
-
-    try:
-        with youtube_dl.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(final_url, download=True)
-            audio_path = ydl.prepare_filename(info)  # actual downloaded file path
-        return (audio_path if os.path.exists(audio_path) else None), video_title
-    except Exception as e:
-        current_app.logger.error(f"yt_dlp download error: {e}")
-        return None, None
-
-
-
-def convert_and_compress_audio_optimized(input_audio_path: str):
-    """Optimized audio conversion with better compression and memory management."""
-    if not input_audio_path or not os.path.exists(input_audio_path):
-        return None
-    output_audio_path = os.path.splitext(input_audio_path)[0] + ".mp3"
-    try:
-        # More aggressive compression for better memory usage
-        subprocess.run(
-            [
-                imageio_ffmpeg.get_ffmpeg_exe(),
-                "-y",
-                "-i", input_audio_path,
-                "-acodec", "libmp3lame",
-                "-ab", "32k",  # Reduced from 64k to 32k
-                "-ar", "16000",  # Reduced from 22050 to 16000
-                "-ac", "1",  # Convert to mono
-                "-af", "volume=0.8",  # Slight volume reduction
-                output_audio_path,
-            ],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            # Removed timeout limit for production
-            timeout=None,
-        )
-        if os.path.exists(output_audio_path):
-            try:
-                os.remove(input_audio_path)
-            except Exception:
-                pass
-            return output_audio_path
-        return None
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-        current_app.logger.error(f"Audio conversion failed: {str(e)}")
-        return None
-    
-
-def transcribe_audio_with_openai(audio_path: str):
-    """Transcribe with OpenAI Whisper-1."""
-    if not audio_path or not os.path.exists(audio_path):
-        return None
-    try:
-        with open(audio_path, "rb") as f:
-            resp = client.audio.transcriptions.create(
-                model="whisper-1",
-                file=f,
-            )
-        return getattr(resp, "text", None)
-    except Exception as e:
-        current_app.logger.error("Transcription error: %s", e)
-        return None
-
-
 
 @transcribe_bp.route("/video", methods=["POST"])
 @token_required
@@ -737,9 +341,6 @@ def transcribe_video_and_store(user):
             pass
 
         # Optimized batch transcription
-# ... existing code ...
-
-        # Optimized batch transcription
         current_app.logger.info(f"Starting transcription for: {title}")
         transcript = transcribe_large_audio_optimized(tmp_mp3)
         if not transcript:
@@ -760,8 +361,6 @@ def transcribe_video_and_store(user):
         chunks = preprocess_and_chunk(transcript)
         safe_namespace = sanitize_id(title)
         chunks_stored = batch_embed_and_upsert_optimized(chunks, safe_namespace, batch_size=8)
-
-# ... existing code ...
 
         # Final memory cleanup
         del transcript, chunks
