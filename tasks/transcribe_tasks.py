@@ -2,7 +2,6 @@
 import os
 import sys
 import gc
-from celery_app import celery_app
 from openai import OpenAI
 from config import Config
 
@@ -46,6 +45,15 @@ def create_app_context():
         import traceback
         print(f"App context error traceback: {traceback.format_exc()}")
         raise
+
+# Import celery_app here to avoid circular imports
+# This will be imported when the task is actually called
+def get_celery_app():
+    from celery_app import celery_app
+    return celery_app
+
+# Get the celery app instance
+celery_app = get_celery_app()
 
 @celery_app.task(bind=True, name="transcribe.audio")
 def transcribe_audio_task(self, title, description, members_list, file_path):

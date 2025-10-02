@@ -69,23 +69,6 @@ def make_celery():
 
     app.conf.update(config)
     
-    # Force import of tasks module to ensure registration
-    try:
-        import tasks.transcribe_tasks
-        print("Successfully imported tasks.transcribe_tasks")
-    except Exception as e:
-        print(f"Error importing tasks: {e}")
-        # Try alternative import
-        try:
-            from tasks import transcribe_tasks
-            print("Successfully imported with alternative method")
-        except Exception as e2:
-            print(f"Alternative import also failed: {e2}")
-    
     return app
 
 celery_app = make_celery()
-
-# Force task registration
-if hasattr(celery_app, 'tasks'):
-    print(f"Registered tasks: {list(celery_app.tasks.keys())}")
