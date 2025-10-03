@@ -56,7 +56,7 @@ def get_celery_app():
 celery_app = get_celery_app()
 
 @celery_app.task(bind=True, name="transcribe.audio")
-def transcribe_audio_task(self, title, description, members_list, file_path):
+def transcribe_audio_task(self, title, description, members_list, storage_url, filename):
     """
     Background task to transcribe uploaded audio with progress reporting.
     """
@@ -67,9 +67,39 @@ def transcribe_audio_task(self, title, description, members_list, file_path):
             meta={'current': 0, 'total': 100, 'status': 'Starting transcription...'}
         )
         
+        # Download file from Supabase storage to local temp file
+        self.update_state(
+            state='PROGRESS',
+            meta={'current': 5, 'total': 100, 'status': 'Downloading audio file...'}
+        )
+        
+        local_file_path = None
+        try:
+            with create_app_context():
+                from flask import current_app
+                import requests
+                import tempfile
+                
+                # Download the file from Supabase storage
+                response = requests.get(storage_url)
+                response.raise_for_status()
+                
+                # Save to temporary file
+                temp_dir = tempfile.gettempdir()
+                local_file_path = os.path.join(temp_dir, filename)
+                
+                with open(local_file_path, 'wb') as f:
+                    f.write(response.content)
+                
+                print(f"Downloaded audio file from storage to: {local_file_path}")
+                
+        except Exception as e:
+            print(f"Failed to download audio file from storage: {e}")
+            return {'ok': False, 'error': f'Failed to download audio file: {str(e)}'}
+        
         # Check if file exists
-        if not os.path.exists(file_path):
-            return {'ok': False, 'error': f'Audio file not found: {file_path}'}
+        if not os.path.exists(local_file_path):
+            return {'ok': False, 'error': f'Audio file not found after download: {local_file_path}'}
         
         # Update progress
         self.update_state(
@@ -78,14 +108,14 @@ def transcribe_audio_task(self, title, description, members_list, file_path):
         )
         
         # Try large audio transcription first
-        transcript = transcribe_large_audio_optimized(file_path)
+        transcript = transcribe_large_audio_optimized(local_file_path)
         if not transcript:
             # Fallback to OpenAI transcription
             self.update_state(
                 state='PROGRESS',
                 meta={'current': 30, 'total': 100, 'status': 'Trying alternative transcription method...'}
             )
-            transcript = transcribe_audio_with_openai(file_path)
+            transcript = transcribe_audio_with_openai(local_file_path)
         
         if not transcript:
             return {'ok': False, 'error': 'Transcription failed with all methods'}
@@ -200,12 +230,22 @@ def transcribe_audio_task(self, title, description, members_list, file_path):
             del chunks
         gc.collect()
         
-        # Clean up uploaded file
+        # Clean up local temporary file
         try:
-            os.remove(file_path)
-            print(f"Cleaned up file: {file_path}")
+            if local_file_path and os.path.exists(local_file_path):
+                os.remove(local_file_path)
+                print(f"Cleaned up local file: {local_file_path}")
         except Exception as e:
-            print(f"Failed to cleanup file {file_path}: {e}")
+            print(f"Failed to cleanup local file {local_file_path}: {e}")
+        
+        # Clean up file from Supabase storage
+        try:
+            with create_app_context():
+                from flask import current_app
+                current_app.supabase.storage.from_("audio_bucket").remove([filename])
+                print(f"Cleaned up storage file: {filename}")
+        except Exception as e:
+            print(f"Failed to cleanup storage file {filename}: {e}")
         
         # Final result - DON'T call update_state after this
         final_result = {
@@ -228,10 +268,18 @@ def transcribe_audio_task(self, title, description, members_list, file_path):
         import traceback
         print(f"Task error traceback: {traceback.format_exc()}")
         
-        # Clean up uploaded file on error
+        # Clean up local file on error
         try:
-            if os.path.exists(file_path):
-                os.remove(file_path)
+            if 'local_file_path' in locals() and local_file_path and os.path.exists(local_file_path):
+                os.remove(local_file_path)
+        except Exception:
+            pass
+        
+        # Clean up storage file on error
+        try:
+            with create_app_context():
+                from flask import current_app
+                current_app.supabase.storage.from_("audio_bucket").remove([filename])
         except Exception:
             pass
         

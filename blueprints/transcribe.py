@@ -98,15 +98,76 @@ def transcribe_and_store(user):
     if audio_file.filename == "":
         return jsonify({"error": "No audio file selected"}), 400
 
-    filename = f"{uuid.uuid4().hex}_{secure_filename(audio_file.filename)}"
-    temp_dir = tempfile.gettempdir()
-    filepath = os.path.join(temp_dir, filename)
-    audio_file.save(filepath)
+    try:
+        # Generate unique filename for storage
+        filename = f"{uuid.uuid4().hex}_{secure_filename(audio_file.filename)}"
+        
+        # Upload to Supabase storage
+        current_app.logger.info(f"Uploading audio file to Supabase storage: {filename}")
+        
+        # Read file content
+        audio_file.seek(0)  # Reset file pointer
+        file_content = audio_file.read()
+        
+        # Determine content type based on file extension
+        file_ext = os.path.splitext(audio_file.filename)[1].lower()
+        content_type_map = {
+            '.mp3': 'audio/mpeg',
+            '.wav': 'audio/wav',
+            '.m4a': 'audio/mp4',
+            '.flac': 'audio/flac',
+            '.ogg': 'audio/ogg'
+        }
+        content_type = content_type_map.get(file_ext, 'audio/mpeg')
+        
+        # Upload to Supabase storage bucket using admin client for better permissions
+        try:
+            storage_response = current_app.supabase_admin.storage.from_("audio_bucket").upload(
+                path=filename,
+                file=file_content,
+                file_options={"content-type": content_type}
+            )
+            current_app.logger.info(f"Storage response: {storage_response}")
+        except Exception as storage_error:
+            current_app.logger.error(f"Storage upload error: {str(storage_error)}")
+            # Try with regular client as fallback
+            try:
+                storage_response = current_app.supabase.storage.from_("audio_bucket").upload(
+                    path=filename,
+                    file=file_content,
+                    file_options={"content-type": content_type}
+                )
+                current_app.logger.info(f"Fallback storage response: {storage_response}")
+            except Exception as fallback_error:
+                current_app.logger.error(f"Fallback storage error: {str(fallback_error)}")
+                return jsonify({"error": f"Failed to upload to storage: {str(fallback_error)}"}), 500
+        
+        # Get the public URL for the uploaded file
+        try:
+            storage_url = current_app.supabase_admin.storage.from_("audio_bucket").get_public_url(filename)
+            current_app.logger.info(f"Audio file uploaded successfully: {storage_url}")
+        except Exception as url_error:
+            current_app.logger.error(f"Error getting public URL: {str(url_error)}")
+            # Try to get signed URL as fallback
+            try:
+                storage_url = current_app.supabase_admin.storage.from_("audio_bucket").create_signed_url(filename, 3600)  # 1 hour expiry
+                if isinstance(storage_url, dict) and 'signedURL' in storage_url:
+                    storage_url = storage_url['signedURL']
+                current_app.logger.info(f"Using signed URL: {storage_url}")
+            except Exception as signed_url_error:
+                current_app.logger.error(f"Error getting signed URL: {str(signed_url_error)}")
+                return jsonify({"error": "Failed to get file URL"}), 500
+        
+        # enqueue Celery task with storage URL instead of local file path
+        task = transcribe_audio_task.delay(title, description, members_list, storage_url, filename)
 
-    # enqueue Celery task
-    task = transcribe_audio_task.delay(title, description, members_list, filepath)
-
-    return jsonify({"task_id": task.id}), 202, {"Location": f"/tasks/{task.id}"}
+        return jsonify({"task_id": task.id}), 202, {"Location": f"/tasks/{task.id}"}
+        
+    except Exception as e:
+        current_app.logger.error(f"Error uploading audio file: {str(e)}")
+        import traceback
+        current_app.logger.error(f"Full traceback: {traceback.format_exc()}")
+        return jsonify({"error": f"Failed to upload audio file: {str(e)}"}), 500
 
 @transcribe_bp.route("/tasks/<task_id>", methods=["GET"])
 @token_required  # Add authentication
