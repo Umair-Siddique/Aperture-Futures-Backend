@@ -27,6 +27,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import psutil
 import logging
+import json
+from flask import Response, stream_with_context
 
 # Import shared utilities
 from transcription_utils import (
@@ -169,57 +171,198 @@ def transcribe_and_store(user):
         current_app.logger.error(f"Full traceback: {traceback.format_exc()}")
         return jsonify({"error": f"Failed to upload audio file: {str(e)}"}), 500
 
+@transcribe_bp.route("/tasks/<task_id>/stream", methods=["GET"])
+@token_required
+def task_status_stream(user, task_id):
+    """
+    Server-Sent Events (SSE) endpoint that streams task status updates in real-time.
+    Frontend can listen to this endpoint to get automatic updates without polling.
+    
+    Usage from frontend:
+        const eventSource = new EventSource(`/tasks/${taskId}/stream`);
+        eventSource.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            // Update UI with data
+        };
+    """
+    def generate():
+        """Generator function that yields SSE formatted messages"""
+        try:
+            last_state = None
+            last_info = None
+            check_interval = 0.5  # Check every 500ms
+            max_duration = 3600  # Maximum 1 hour of streaming
+            elapsed = 0
+            
+            while elapsed < max_duration:
+                try:
+                    result = AsyncResult(task_id, app=celery_app)
+                    
+                    # Prepare response data
+                    if result.state == 'PENDING':
+                        data = {
+                            'id': task_id,
+                            'state': result.state,
+                            'current': 0,
+                            'total': 100,
+                            'status': 'Task is waiting to be processed...',
+                            'progress_percent': 0
+                        }
+                    elif result.state == 'PROGRESS':
+                        current = result.info.get('current', 0)
+                        total = result.info.get('total', 100)
+                        data = {
+                            'id': task_id,
+                            'state': result.state,
+                            'current': current,
+                            'total': total,
+                            'status': result.info.get('status', 'Processing...'),
+                            'progress_percent': int((current / total) * 100) if total > 0 else 0
+                        }
+                    elif result.state == 'SUCCESS':
+                        data = {
+                            'id': task_id,
+                            'state': result.state,
+                            'current': 100,
+                            'total': 100,
+                            'status': 'Task completed successfully',
+                            'progress_percent': 100,
+                            'result': result.result
+                        }
+                    elif result.state == 'FAILURE':
+                        error_info = result.info if isinstance(result.info, dict) else {}
+                        data = {
+                            'id': task_id,
+                            'state': result.state,
+                            'current': 0,
+                            'total': 100,
+                            'status': 'Task failed',
+                            'progress_percent': 0,
+                            'error': str(error_info.get('error', str(result.info)))
+                        }
+                    elif result.state == 'REVOKED':
+                        data = {
+                            'id': task_id,
+                            'state': result.state,
+                            'current': 0,
+                            'total': 100,
+                            'status': 'Task was cancelled',
+                            'progress_percent': 0
+                        }
+                    else:
+                        data = {
+                            'id': task_id,
+                            'state': result.state,
+                            'status': f'Unknown task state: {result.state}',
+                            'progress_percent': 0
+                        }
+                    
+                    # Only send update if state or info changed
+                    current_state = (result.state, json.dumps(data, sort_keys=True))
+                    if current_state != last_state:
+                        yield f"data: {json.dumps(data)}\n\n"
+                        last_state = current_state
+                    
+                    # If task is in terminal state, close the stream
+                    if result.state in ['SUCCESS', 'FAILURE', 'REVOKED']:
+                        break
+                    
+                    import time
+                    time.sleep(check_interval)
+                    elapsed += check_interval
+                    
+                except Exception as e:
+                    current_app.logger.error(f"Error in SSE stream: {str(e)}")
+                    error_data = {
+                        'id': task_id,
+                        'state': 'ERROR',
+                        'error': 'Failed to check task status',
+                        'progress_percent': 0
+                    }
+                    yield f"data: {json.dumps(error_data)}\n\n"
+                    break
+            
+            # Send final close message
+            yield f"event: close\ndata: {json.dumps({'message': 'Stream closed'})}\n\n"
+            
+        except GeneratorExit:
+            # Client disconnected
+            pass
+    
+    return Response(
+        stream_with_context(generate()),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'X-Accel-Buffering': 'no',  # Disable buffering in nginx
+            'Connection': 'keep-alive'
+        }
+    )
+
+
 @transcribe_bp.route("/tasks/<task_id>", methods=["GET"])
-@token_required  # Add authentication
+@token_required
 def task_status(user, task_id):
-    """Get the status of a background transcription task."""
+    """Get the status of a background transcription task (polling endpoint)."""
     try:
         result = AsyncResult(task_id, app=celery_app)
         
         if result.state == 'PENDING':
-            # Task is waiting to be processed
             response = {
                 'id': task_id,
                 'state': result.state,
                 'current': 0,
                 'total': 100,
-                'status': 'Task is waiting to be processed...'
+                'status': 'Task is waiting to be processed...',
+                'progress_percent': 0
             }
         elif result.state == 'PROGRESS':
-            # Task is currently being processed
+            current = result.info.get('current', 0)
+            total = result.info.get('total', 100)
             response = {
                 'id': task_id,
                 'state': result.state,
-                'current': result.info.get('current', 0),
-                'total': result.info.get('total', 100),
-                'status': result.info.get('status', 'Processing...')
+                'current': current,
+                'total': total,
+                'status': result.info.get('status', 'Processing...'),
+                'progress_percent': int((current / total) * 100) if total > 0 else 0
             }
         elif result.state == 'SUCCESS':
-            # Task completed successfully
             response = {
                 'id': task_id,
                 'state': result.state,
                 'current': 100,
                 'total': 100,
                 'status': 'Task completed successfully',
+                'progress_percent': 100,
                 'result': result.result
             }
         elif result.state == 'FAILURE':
-            # Task failed
+            error_info = result.info if isinstance(result.info, dict) else {}
             response = {
                 'id': task_id,
                 'state': result.state,
                 'current': 0,
                 'total': 100,
                 'status': 'Task failed',
-                'error': str(result.info.get('error', 'Unknown error'))
+                'progress_percent': 0,
+                'error': str(error_info.get('error', str(result.info)))
             }
-        else:
-            # Unknown state
+        elif result.state == 'REVOKED':
             response = {
                 'id': task_id,
                 'state': result.state,
-                'status': f'Unknown task state: {result.state}'
+                'current': 0,
+                'total': 100,
+                'status': 'Task was cancelled',
+                'progress_percent': 0
+            }
+        else:
+            response = {
+                'id': task_id,
+                'state': result.state,
+                'status': f'Unknown task state: {result.state}',
+                'progress_percent': 0
             }
         
         return jsonify(response), 200
@@ -229,7 +372,50 @@ def task_status(user, task_id):
         return jsonify({
             'id': task_id,
             'state': 'ERROR',
-            'error': 'Failed to check task status'
+            'error': 'Failed to check task status',
+            'progress_percent': 0
+        }), 500
+
+
+@transcribe_bp.route("/tasks/<task_id>/cancel", methods=["POST"])
+@token_required
+def cancel_task(user, task_id):
+    """
+    Cancel a running background task.
+    Note: This will attempt to revoke the task. If the task is already running,
+    it may not stop immediately depending on what it's currently doing.
+    """
+    try:
+        result = AsyncResult(task_id, app=celery_app)
+        
+        # Check if task is in a state that can be cancelled
+        if result.state in ['SUCCESS', 'FAILURE', 'REVOKED']:
+            return jsonify({
+                'id': task_id,
+                'state': result.state,
+                'message': f'Task is already in terminal state: {result.state}',
+                'cancelled': False
+            }), 400
+        
+        # Revoke the task
+        # terminate=True will kill the worker process (more aggressive)
+        # terminate=False will just mark it as revoked (softer approach)
+        result.revoke(terminate=False, signal='SIGTERM')
+        
+        current_app.logger.info(f"Task {task_id} cancellation requested")
+        
+        return jsonify({
+            'id': task_id,
+            'message': 'Task cancellation requested',
+            'cancelled': True
+        }), 200
+        
+    except Exception as e:
+        current_app.logger.error(f"Error cancelling task: {str(e)}")
+        return jsonify({
+            'id': task_id,
+            'error': 'Failed to cancel task',
+            'cancelled': False
         }), 500
 
 
