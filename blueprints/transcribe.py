@@ -301,8 +301,7 @@ def task_status_stream(user, task_id):
 
 
 @transcribe_bp.route("/tasks/<task_id>", methods=["GET"])
-@token_required
-def task_status(user, task_id):
+def task_status(task_id):
     """Get the status of a background transcription task (polling endpoint)."""
     try:
         result = AsyncResult(task_id, app=celery_app)
