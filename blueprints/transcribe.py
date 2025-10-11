@@ -19,7 +19,7 @@ from .auth import token_required
 import imageio_ffmpeg
 from report.generate_report import generate_and_store_transcription_report
 import gc
-from tasks.transcribe_tasks import transcribe_audio_task
+from tasks.transcribe_tasks import transcribe_audio_task, transcribe_video_task
 from celery.result import AsyncResult
 from celery_app import celery_app
 
@@ -540,107 +540,21 @@ def transcribe_video_and_store(user):
     if not (parsed.scheme and parsed.netloc):
         return jsonify({"error": "Invalid URL"}), 400
 
+    # Check if title already exists
     exists = current_app.supabase.table("audio_files").select("title").eq("title", title).execute()
     if exists.data:
         return jsonify({"error": f"title '{title}' already exists"}), 409
 
-    # Check memory usage before starting
-    check_memory_usage()
-
-    now_epoch = int(time.time())
-    tmp_mp3 = None
-    audio_path = None
-
     try:
-        current_app.supabase.table("audio_files").insert({
-            "title": title,
-            "description": description,
-            "members": members_list,
-            "timestamp": now_epoch,
-        }).execute()
-    except Exception as e:
-        current_app.logger.error("Supabase insert error: %s", e)
-        return jsonify({"error": "Failed to insert record"}), 500
-
-    try:
-        current_app.logger.info(f"Starting video processing for: {title}")
+        # Enqueue Celery task for background processing
+        task = transcribe_video_task.delay(title, description, members_list, video_url)
         
-        # Download audio from video
-        audio_path, inferred_title = download_audio(video_url)
-        if not audio_path:
-            # Clean up database entry if download failed
-            current_app.supabase.table('audio_files').delete().eq("title", title).execute()
-            return jsonify({"error": "Audio download failed"}), 500
-
-        # Convert and compress audio
-        tmp_mp3 = convert_and_compress_audio_optimized(audio_path)
-        if not tmp_mp3:
-            # Clean up database entry if conversion failed
-            current_app.supabase.table('audio_files').delete().eq("title", title).execute()
-            return jsonify({"error": "Audio conversion/compression failed"}), 500
-
-        # Clean up original audio file
-        try:
-            if audio_path and os.path.exists(audio_path):
-                os.remove(audio_path)
-        except Exception:
-            pass
-
-        # Optimized batch transcription
-        current_app.logger.info(f"Starting transcription for: {title}")
-        transcript = transcribe_large_audio_optimized(tmp_mp3)
-        if not transcript:
-            # Clean up database entry if transcription failed
-            current_app.supabase.table('audio_files').delete().eq("title", title).execute()
-            return jsonify({"error": "Transcription failed"}), 500
-
-        # Report generation - directly added
-        report_info = {}
-        try:
-            report_info = generate_and_store_transcription_report(title=title, transcript=transcript)
-            current_app.logger.info(f"Report generation completed for: {title}")
-        except Exception as e:
-            current_app.logger.error("Report generation failed: %s", e)
-
-        # Process embeddings
-        current_app.logger.info(f"Processing embeddings for: {title}")
-        chunks = preprocess_and_chunk(transcript)
-        safe_namespace = sanitize_id(title)
-        chunks_stored = batch_embed_and_upsert_optimized(chunks, safe_namespace, batch_size=8)
-
-        # Final memory cleanup
-        del transcript, chunks
-        gc.collect()
-
-        current_app.logger.info(f"Successfully completed video transcription for: {title}")
-        return jsonify({
-            "title": title,
-            "description": description,
-            "members": members_list,
-            "url": video_url,
-            "timestamp": now_epoch,
-            "chunks_stored": chunks_stored,
-            "report_saved": bool(report_info.get("ok"))
-        }), 200
-
+        current_app.logger.info(f"Video transcription task enqueued for: {title}, task_id: {task.id}")
+        
+        return jsonify({"task_id": task.id}), 202, {"Location": f"/tasks/{task.id}"}
+        
     except Exception as e:
-        current_app.logger.error(f"Error in video transcription: {str(e)}")
-        # Clean up database entry on error
-        try:
-            current_app.supabase.table('audio_files').delete().eq("title", title).execute()
-        except Exception:
-            pass
-        return jsonify({"error": "Internal server error during video transcription"}), 500
-
-    finally:
-        # Always cleanup temporary files
-        try:
-            if tmp_mp3 and os.path.exists(tmp_mp3):
-                os.remove(tmp_mp3)
-        except Exception:
-            pass
-        try:
-            if audio_path and os.path.exists(audio_path):
-                os.remove(audio_path)
-        except Exception:
-            pass
+        current_app.logger.error(f"Error enqueueing video transcription task: {str(e)}")
+        import traceback
+        current_app.logger.error(f"Full traceback: {traceback.format_exc()}")
+        return jsonify({"error": f"Failed to enqueue video transcription task: {str(e)}"}), 500
