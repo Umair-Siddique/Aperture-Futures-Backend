@@ -65,7 +65,7 @@ def init_services(app):
     
     if not Config.CLAUDE_API_KEY:
         raise ValueError("CLAUDE_API_KEY not found in environment variables. Please check your .env file.")
-    app.anthropic_client = anthropic.Anthropic(api_key=Config.CLAUDE_API_KEY)
+    app.anthropic = anthropic.Anthropic(api_key=Config.CLAUDE_API_KEY)
     
     if not Config.PINECONE_API_KEY:
         raise ValueError("PINECONE_API_KEY not found in environment variables. Please check your .env file.")

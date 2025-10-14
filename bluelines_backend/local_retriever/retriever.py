@@ -19,7 +19,7 @@ from typing import Optional, List, Tuple
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 
-anthropic_client = anthropic.Anthropic(api_key=Config.anthropic_api_key)
+anthropic_client = anthropic.Anthropic(api_key=Config.CLAUDE_API_KEY)
 
 memory = ConversationBufferWindowMemory(k=5, return_messages=True)
 

@@ -9,9 +9,9 @@ class Config:
     SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")  # For admin operations
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
     PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
-    anthropic_api_key = os.getenv("CLAUDE_API_KEY")
-    UNSC_INDEX_NAME = os.getenv("UNSC_INDEX_NAME")
-    GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+    anthropic_api_key = os.getenv("CLAUDE_API_KEY")  # Add this line
+    UNSC_INDEX_NAME = os.getenv("UNSC_INDEX_NAME")    # Add this line
+    GROQ_API_KEY = os.getenv("GROQ_API_KEY")          # Add this line - fixes current error
     CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY")
     PINECONE_ENV = os.getenv("PINECONE_ENVIRONMENT")
     MEETING_TRANSCRIPTS_INDEX = os.getenv("MEETING_TRANSCRIPTS_INDEX")
