@@ -26,3 +26,5 @@ soundfile
 psutil
 celery
 redis
+tavily-python
+langgraph

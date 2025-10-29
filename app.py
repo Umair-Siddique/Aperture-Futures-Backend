@@ -1,7 +1,7 @@
 from flask import Flask
 from config import Config
 import tempfile
-from extensions import init_supabase, init_groq, init_anthropic, init_openai_embeddings, init_pinecone, init_services
+from extensions import init_supabase, init_groq, init_anthropic, init_openai_embeddings, init_pinecone, init_services, init_tavily
 from blueprints.auth import auth_bp
 from blueprints.transcribe import transcribe_bp
 from blueprints.conversations import conversations_bp
@@ -38,6 +38,7 @@ def create_app():
     init_anthropic(app)
     init_openai_embeddings(app)
     init_pinecone(app)
+    init_tavily(app)
     
     # Initialize services needed by bluelines_backend
     init_services(app)

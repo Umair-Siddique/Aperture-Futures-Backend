@@ -4,14 +4,162 @@ from uuid import uuid4
 from datetime import datetime
 from langchain.schema.runnable import RunnableLambda, RunnablePassthrough
 from config import Config
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Literal
 import asyncio
 from langchain_openai import OpenAIEmbeddings
 from concurrent.futures import ThreadPoolExecutor
 from pinecone import Pinecone
+from langgraph.graph import StateGraph, END
+from typing_extensions import TypedDict
 
 retriever_bp = Blueprint('bluelines_retriever', __name__)
 executor = ThreadPoolExecutor()
+
+# Define state for LangGraph
+class GraphState(TypedDict):
+    query: str
+    query_type: str
+    context: str
+    app: object
+
+def classify_query_type(query: str, app) -> str:
+    """
+    Use LLM to classify whether query needs web search (reliefweb), 
+    Security Council Report search, or resolution search (Pinecone).
+    """
+    with app.app_context():
+        prompt = f"""
+Analyze the following query and determine if it requires:
+
+1. WEB SEARCH (reliefweb, humanitarian reports, WEF documents, current events, news)
+   - Examples: "Ukraine Humanitarian situation Report", "Latest WEF report", "Syrian crisis update from reliefweb"
+   - Indicators: mentions of humanitarian reports, situation reports, reliefweb, WEF, current news, humanitarian crises
+
+2. SECURITY COUNCIL REPORT SEARCH (Security Council Report website - forecasts, analysis, what's in blue)
+   - Examples: "Latest Security Council forecast", "What's in blue for Yemen", "Security Council monthly forecast", "SCR report on Somalia"
+   - Indicators: mentions of Security Council Report, monthly forecasts, What's In Blue, SCR publications, Security Council analysis, upcoming Council meetings
+
+3. RESOLUTION SEARCH (UN Security Council resolutions from Pinecone database)
+   - Examples: "Draft resolution about climate security", "Find resolutions about North Korea sanctions"
+   - Indicators: mentions of resolutions, UNSC resolutions, draft resolutions, sanctions, peacekeeping mandates, resolution text
+
+QUERY TO ANALYZE:
+"{query}"
+
+Respond with ONLY one word: "web" or "security_council_report" or "resolution"
+
+RESPONSE:"""
+        
+        response = app.llm.invoke(prompt).strip().lower()
+        
+        # Ensure valid response
+        if "web" in response:
+            return "web"
+        elif "security_council_report" in response or "scr" in response:
+            return "security_council_report"
+        elif "resolution" in response:
+            return "resolution"
+        else:
+            # Default to resolution if unclear
+            return "resolution"
+
+def search_tavily(query: str, app) -> str:
+    """
+    Search using Tavily API with reliefweb focus for humanitarian and current event queries.
+    """
+    with app.app_context():
+        try:
+            # Perform Tavily search with provided parameters
+            search_params = {
+                "query": query,
+                "topic": "news",
+                "search_depth": "advanced",
+                "max_results": 1,
+                "include_answer": True,
+                "include_raw_content": True,
+                "include_images": False,
+                "include_domains": ["reliefweb.int"],
+            }
+            
+            response = app.tavily.search(**search_params)
+            
+            # Format the results
+            formatted_results = []
+            
+            # Add the AI-generated answer if available
+            if response.get("answer"):
+                formatted_results.append(f"SUMMARY:\n{response['answer']}\n{'-' * 50}\n")
+            
+            # Add detailed results
+            for idx, result in enumerate(response.get("results", []), 1):
+                formatted = (
+                    f"SOURCE {idx}:\n"
+                    f"TITLE: {result.get('title', 'N/A')}\n"
+                    f"URL: {result.get('url', 'N/A')}\n"
+                    f"CONTENT:\n{result.get('content', 'N/A')}\n"
+                )
+                
+                # Add raw content if available
+                if result.get('raw_content'):
+                    formatted += f"FULL TEXT:\n{result.get('raw_content')[:2000]}...\n"
+                
+                formatted += "-" * 50 + "\n"
+                formatted_results.append(formatted)
+            
+            return "\n".join(formatted_results) if formatted_results else "No results found from web search."
+            
+        except Exception as e:
+            logging.error(f"Tavily search error: {e}")
+            return f"Error performing web search: {str(e)}"
+
+def search_security_council_report(query: str, app) -> str:
+    """
+    Search using Tavily API with Security Council Report focus for UNSC analysis, forecasts, and What's In Blue.
+    """
+    with app.app_context():
+        try:
+            # Perform Tavily search targeting securitycouncilreport.org
+            search_params = {
+                "query": query,
+                "topic": "general",
+                "search_depth": "advanced",
+                "max_results": 1,
+                "include_answer": True,
+                "include_raw_content": True,
+                "include_images": False,
+                "include_domains": ["securitycouncilreport.org"],
+            }
+            
+            response = app.tavily.search(**search_params)
+            
+            # Format the results
+            formatted_results = []
+            
+            # Add the AI-generated answer if available
+            if response.get("answer"):
+                formatted_results.append(f"SUMMARY:\n{response['answer']}\n{'-' * 50}\n")
+            
+            # Add detailed results
+            for idx, result in enumerate(response.get("results", []), 1):
+                formatted = (
+                    f"SOURCE {idx}:\n"
+                    f"TITLE: {result.get('title', 'N/A')}\n"
+                    f"URL: {result.get('url', 'N/A')}\n"
+                    f"CONTENT:\n{result.get('content', 'N/A')}\n"
+                )
+                
+                # Add raw content if available
+                if result.get('raw_content'):
+                    formatted += f"FULL TEXT:\n{result.get('raw_content')[:2000]}...\n"
+                
+                formatted += "-" * 50 + "\n"
+                formatted_results.append(formatted)
+            
+            return "\n".join(formatted_results) if formatted_results else "No results found from Security Council Report."
+            
+        except Exception as e:
+            logging.error(f"Security Council Report search error: {e}")
+            return f"Error performing Security Council Report search: {str(e)}"
 
 def retrieve_documents(query: str, app, top_k: int = 5, namespace: Optional[str] = None, index_name: str = "unsc-index"):
     with app.app_context():
@@ -34,23 +182,46 @@ def run_in_executor(func, *args):
     loop = asyncio.get_event_loop()
     return loop.run_in_executor(executor, func, *args)
 
-async def parallel_retrieve(query: str, app):
-    if not needs_retrieval_llm(query, app):
-        print("\n🚫 Retrieval not triggered based on query.")
-        return ""
+# LangGraph node functions
+def classify_node(state: GraphState) -> GraphState:
+    """Node to classify query type"""
+    query_type = classify_query_type(state["query"], state["app"])
+    state["query_type"] = query_type
+    print(f"🔍 Query classified as: {query_type}")
+    return state
 
-    dense_future = run_in_executor(retrieve_documents, query, app)
-    structured_future = run_in_executor(conditional_retrieval, query, app)
+def web_search_node(state: GraphState) -> GraphState:
+    """Node to perform Tavily web search"""
+    print("🌐 Performing web search via Tavily...")
+    context = search_tavily(state["query"], state["app"])
+    state["context"] = context
+    return state
 
-    dense_results, structured_results = await asyncio.gather(dense_future, structured_future)
+def security_council_report_search_node(state: GraphState) -> GraphState:
+    """Node to perform Security Council Report search"""
+    print("📰 Performing Security Council Report search via Tavily...")
+    context = search_security_council_report(state["query"], state["app"])
+    state["context"] = context
+    return state
 
+def resolution_search_node(state: GraphState) -> GraphState:
+    """Node to perform Pinecone resolution search"""
+    print("📚 Performing resolution search via Pinecone...")
+    
+    app = state["app"]
+    query = state["query"]
+    
+    # Retrieve documents from Pinecone
+    dense_results = retrieve_documents(query, app)
+    structured_results = conditional_retrieval(query, app)
+    
     structured_resolution_numbers = {doc.metadata.get('resolution_no') for doc in structured_results}
-
+    
     filtered_dense_results = [
         (doc_id, metadata) for doc_id, metadata in dense_results
         if metadata.get('resolution_no') not in structured_resolution_numbers
     ]
-
+    
     def format_metadata(doc_id, metadata):
         formatted = (
             f"RESOLUTION: {metadata.get('resolution_no', 'N/A')} ({metadata.get('year', 'N/A')})\n"
@@ -65,12 +236,12 @@ async def parallel_retrieve(query: str, app):
             + "-" * 50 + "\n"
         )
         return formatted
-
+    
     dense_formatted_docs = [
         format_metadata(doc_id, metadata)
         for doc_id, metadata in filtered_dense_results
     ]
-
+    
     structured_formatted_docs = [
         format_metadata(
             doc.metadata.get('resolution_no', 'N/A'),
@@ -81,14 +252,89 @@ async def parallel_retrieve(query: str, app):
         )
         for doc in structured_results
     ]
-
+    
     combined_context = "\n".join(dense_formatted_docs + structured_formatted_docs)
-    return combined_context
+    state["context"] = combined_context
+    return state
+
+def route_query(state: GraphState) -> Literal["web_search", "security_council_report_search", "resolution_search"]:
+    """Conditional routing based on query type"""
+    if state["query_type"] == "web":
+        return "web_search"
+    elif state["query_type"] == "security_council_report":
+        return "security_council_report_search"
+    else:
+        return "resolution_search"
+
+# Build LangGraph workflow
+def build_retrieval_graph():
+    """Build the LangGraph workflow for conditional retrieval"""
+    workflow = StateGraph(GraphState)
+    
+    # Add nodes
+    workflow.add_node("classify", classify_node)
+    workflow.add_node("web_search", web_search_node)
+    workflow.add_node("security_council_report_search", security_council_report_search_node)
+    workflow.add_node("resolution_search", resolution_search_node)
+    
+    # Set entry point
+    workflow.set_entry_point("classify")
+    
+    # Add conditional edges
+    workflow.add_conditional_edges(
+        "classify",
+        route_query,
+        {
+            "web_search": "web_search",
+            "security_council_report_search": "security_council_report_search",
+            "resolution_search": "resolution_search"
+        }
+    )
+    
+    # Add edges to END
+    workflow.add_edge("web_search", END)
+    workflow.add_edge("security_council_report_search", END)
+    workflow.add_edge("resolution_search", END)
+    
+    return workflow.compile()
+
+# Create the compiled graph (singleton)
+retrieval_graph = build_retrieval_graph()
+
+async def parallel_retrieve(query: str, app):
+    """
+    Main retrieval function using LangGraph for conditional routing
+    between web search (Tavily/ReliefWeb), Security Council Report search (Tavily),
+    and resolution search (Pinecone)
+    """
+    if not needs_retrieval_llm(query, app):
+        print("\n🚫 Retrieval not triggered based on query.")
+        return ""
+    
+    # Initialize state
+    initial_state = {
+        "query": query,
+        "query_type": "",
+        "context": "",
+        "app": app
+    }
+    
+    # Run the graph synchronously (LangGraph doesn't require async for invoke)
+    def run_graph():
+        result = retrieval_graph.invoke(initial_state)
+        return result["context"]
+    
+    # Execute in thread pool to avoid blocking
+    loop = asyncio.get_event_loop()
+    context = await loop.run_in_executor(executor, run_graph)
+    
+    return context
 
 def needs_retrieval_llm(query: str, app):
     with app.app_context():
         prompt = f"""
 As a UN Security Council resolution expert assistant, analyze if the user query requires:
+
 1. Drafting a new resolution on a SPECIFIC TOPIC
    - Example: "Draft resolution about climate security"
    - Example: "Create resolution on Syrian humanitarian access"
@@ -101,7 +347,19 @@ As a UN Security Council resolution expert assistant, analyze if the user query 
    - Example: "How many resolutions mention cybersecurity?"
    - Example: "Total resolutions on Darfur since 2010"
 
-Respond "yes" ONLY for these cases. For all other queries (procedural questions, general UNSC info, 
+4. Web search for humanitarian reports, WEF documents, reliefweb content, current events
+   - Example: "Ukraine Humanitarian situation Report no 56"
+   - Example: "Latest WEF report on global risks"
+   - Example: "Syrian crisis update from reliefweb"
+   - Example: "Current humanitarian situation in Gaza"
+
+5. Security Council Report search for forecasts, What's In Blue, analysis
+   - Example: "Latest Security Council forecast for Yemen"
+   - Example: "What's in blue for Somalia"
+   - Example: "Security Council Report monthly forecast"
+   - Example: "SCR analysis on Libya"
+
+Respond "yes" for ANY of these cases. For all other queries (procedural questions, general UNSC info, 
 resolution formatting help, or vague requests without specific topics/parameters), respond "no".
 
 QUERY TO ANALYZE:
@@ -276,6 +534,27 @@ def query_retriever():
 
     store_message(conversation_id, "user", query, app)
 
+    # --- Determine route/source upfront for status message ---
+    def classify_and_route():
+        # Directly use existing logic to classify, then route_query function to map to node
+        initial_state = {
+            "query": query,
+            "query_type": "",
+            "context": "",
+            "app": app
+        }
+        classified_state = classify_node(initial_state)
+        node_route = route_query(classified_state)  # "web_search" | "security_council_report_search" | "resolution_search"
+        return node_route
+
+    route = classify_and_route()
+    if route == "web_search":
+        status_msg = "[STATUS] Searching from ReliefWeb...\n"
+    elif route == "security_council_report_search":
+        status_msg = "[STATUS] Searching from Security Council Report Web...\n"
+    else:
+        status_msg = "[STATUS] Searching from Database...\n"
+
     async def retrieve_and_build():
         return await parallel_retrieve(query, app)
 
@@ -285,16 +564,17 @@ def query_retriever():
 
     def generate_and_store():
         with app.app_context():
-         chunks = []
-
-         for chunk in generate_llm_response(final_prompt, SYSTEM_PROMPT, app, model_id=model_id):
-            if chunk:
-                chunks.append(chunk)
-                yield chunk  # Stream each piece
-
-        # Now store full message after all chunks are sent
-         complete_response = "".join(chunks)
-         store_message(conversation_id, "assistant", complete_response, app)
+            chunks = []
+            # Yield status first
+            yield status_msg
+            # Then yield LLM streamed output as before
+            for chunk in generate_llm_response(final_prompt, SYSTEM_PROMPT, app, model_id=model_id):
+                if chunk:
+                    chunks.append(chunk)
+                    yield chunk  # Stream each piece
+            # Now store full message after all chunks are sent
+            complete_response = "".join(chunks)
+            store_message(conversation_id, "assistant", complete_response, app)
     return Response(stream_with_context(generate_and_store()), mimetype='text/plain')
 
 

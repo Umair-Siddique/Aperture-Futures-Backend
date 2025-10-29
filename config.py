@@ -19,6 +19,7 @@ class Config:
     GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
     CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL')
     CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND')
+    TAVILY_API_KEY = os.getenv('TAVILY_API_KEY')
 
     # SMTP / Email settings
     SMTP_HOST = os.getenv("SMTP_HOST", "smtp.protonmail.ch")

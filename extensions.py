@@ -6,6 +6,7 @@ from langchain_openai import OpenAIEmbeddings
 from langchain_openai import OpenAI
 from openai import OpenAI as OpenAIClient
 from pinecone import Pinecone
+from tavily import TavilyClient
 
 def get_api_key_from_supabase(supabase_client, key_name, fallback_key=None):
     """Get API key from Supabase, with fallback to environment variable"""
@@ -20,6 +21,16 @@ def get_api_key_from_supabase(supabase_client, key_name, fallback_key=None):
     if fallback_key:
         return fallback_key
     return None
+    
+def init_tavily(app):
+    # Try to get TAVILY API key from Supabase first, fallback to environment
+    tavily_key = get_api_key_from_supabase(app.supabase_admin, 'TAVILY_API_KEY', Config.TAVILY_API_KEY)
+    
+    if not tavily_key:
+        raise ValueError("TAVILY_API_KEY not found in Supabase or environment variables.")
+    
+    app.tavily = TavilyClient(api_key=tavily_key)
+    print("✓ Tavily client initialized successfully")
 
 def init_supabase(app):
     # Create two clients: one with anon key for public operations, one with service role for admin
@@ -49,6 +60,7 @@ def init_openai_embeddings(app):
         model="text-embedding-3-large",
         openai_api_key=Config.OPENAI_API_KEY,
     )
+
 
 def init_services(app):
     # Initialize embeddings
