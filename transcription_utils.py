@@ -11,7 +11,7 @@ import yt_dlp as youtube_dl
 from urllib.parse import urlparse
 from openai import OpenAI
 from config import Config
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 import imageio_ffmpeg
 import logging
 import shutil

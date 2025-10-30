@@ -2,7 +2,7 @@ from textwrap import dedent
 from typing import Dict, List
 from flask import current_app
 from config import Config
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 import time
 
 

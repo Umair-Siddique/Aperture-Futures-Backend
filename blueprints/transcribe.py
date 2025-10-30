@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 from math import ceil
 from openai import OpenAI
 from config import Config
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from .auth import token_required
 import imageio_ffmpeg
 from report.generate_report import generate_and_store_transcription_report

@@ -2,7 +2,7 @@ import os
 import faiss
 import numpy as np
 import fitz
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_ollama import OllamaEmbeddings
 from groq import Groq
 from dotenv import load_dotenv

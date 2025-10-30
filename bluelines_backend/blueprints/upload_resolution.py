@@ -1,7 +1,7 @@
 from flask import Blueprint, request, jsonify, current_app
 import os
 import fitz
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from dotenv import load_dotenv
 import json
 import re
