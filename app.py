@@ -12,6 +12,7 @@ from blueprints.reports import report_bp
 # Import BlueLines blueprints
 from bluelines_backend.blueprints.chat import chat_bp as bluelines_chat_bp
 from bluelines_backend.blueprints.retriever_api import retriever_bp as bluelines_retriever_bp
+from bluelines_backend.blueprints.upload_resolution import upload_resolution_bp
 
 from flask_cors import CORS
 
@@ -55,5 +56,6 @@ def create_app():
     # Register BlueLines blueprints
     app.register_blueprint(bluelines_chat_bp, url_prefix="/bluelines/chat")
     app.register_blueprint(bluelines_retriever_bp, url_prefix="/bluelines/retriever")
+    app.register_blueprint(upload_resolution_bp, url_prefix="/bluelines/resolution")
     
     return app

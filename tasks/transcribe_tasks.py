@@ -550,3 +550,148 @@ def transcribe_video_task(self, title, description, members_list, video_url):
             pass
         
         return {'ok': False, 'error': error_msg}
+
+
+@celery_app.task(bind=True, name="process.resolution")
+def process_resolution_task(self, filename, storage_url):
+    """
+    Background task to process uploaded PDF resolution with progress reporting.
+    """
+    local_file_path = None
+    
+    try:
+        # Update task state to PROGRESS
+        self.update_state(
+            state='PROGRESS',
+            meta={'current': 0, 'total': 100, 'status': 'Starting PDF processing...'}
+        )
+        
+        # Download file from Supabase storage to local temp file
+        self.update_state(
+            state='PROGRESS',
+            meta={'current': 5, 'total': 100, 'status': 'Downloading PDF file...'}
+        )
+        
+        try:
+            with create_app_context():
+                from flask import current_app
+                import requests
+                import tempfile
+                
+                # Download the file from Supabase storage
+                response = requests.get(storage_url)
+                response.raise_for_status()
+                
+                # Save to temporary file
+                temp_dir = tempfile.gettempdir()
+                local_file_path = os.path.join(temp_dir, filename)
+                
+                with open(local_file_path, 'wb') as f:
+                    f.write(response.content)
+                
+                print(f"Downloaded PDF file from storage to: {local_file_path}")
+                
+        except Exception as e:
+            print(f"Failed to download PDF file from storage: {e}")
+            return {'ok': False, 'error': f'Failed to download PDF file: {str(e)}'}
+        
+        # Check if file exists
+        if not os.path.exists(local_file_path):
+            return {'ok': False, 'error': f'PDF file not found after download: {local_file_path}'}
+        
+        # Update progress
+        self.update_state(
+            state='PROGRESS',
+            meta={'current': 20, 'total': 100, 'status': 'Processing PDF...'}
+        )
+        
+        # Process the PDF with the original logic
+        try:
+            with create_app_context():
+                from flask import current_app
+                from bluelines_backend.blueprints.upload_resolution import process_pdf_with_openai
+                
+                # Open the file and pass to processing function
+                with open(local_file_path, 'rb') as pdf_file:
+                    # Create a file-like object that process_pdf_with_openai expects
+                    from io import BytesIO
+                    file_content = pdf_file.read()
+                    pdf_file_obj = BytesIO(file_content)
+                    pdf_file_obj.seek(0)
+                    
+                    # Get the app instance
+                    app = current_app._get_current_object()
+                    
+                    # Process the PDF
+                    self.update_state(
+                        state='PROGRESS',
+                        meta={'current': 30, 'total': 100, 'status': 'Extracting text and metadata...'}
+                    )
+                    
+                    result = process_pdf_with_openai(pdf_file_obj, filename, app)
+                    
+                    print(f"Successfully processed PDF: {filename}")
+                    print(f"Result: {result}")
+                    
+        except Exception as e:
+            print(f"Failed to process PDF: {e}")
+            import traceback
+            print(f"PDF processing error traceback: {traceback.format_exc()}")
+            return {'ok': False, 'error': f'Failed to process PDF: {str(e)}'}
+        
+        # Update progress
+        self.update_state(
+            state='PROGRESS',
+            meta={'current': 90, 'total': 100, 'status': 'Finalizing...'}
+        )
+        
+        # Clean up local temporary file
+        try:
+            if local_file_path and os.path.exists(local_file_path):
+                os.remove(local_file_path)
+                print(f"Cleaned up local file: {local_file_path}")
+        except Exception as e:
+            print(f"Failed to cleanup local file {local_file_path}: {e}")
+        
+        # Clean up file from Supabase storage
+        try:
+            with create_app_context():
+                from flask import current_app
+                current_app.supabase.storage.from_("audio_bucket").remove([filename])
+                print(f"Cleaned up storage file: {filename}")
+        except Exception as e:
+            print(f"Failed to cleanup storage file {filename}: {e}")
+        
+        # Final result
+        final_result = {
+            "ok": True,
+            "message": "PDF processed and stored successfully",
+            "data": result
+        }
+        
+        print(f"Task completed with result: {final_result}")
+        return final_result
+        
+    except Exception as e:
+        # Simple error handling
+        error_msg = str(e)
+        print(f"Task failed with error: {error_msg}")
+        import traceback
+        print(f"Task error traceback: {traceback.format_exc()}")
+        
+        # Clean up local file on error
+        try:
+            if local_file_path and os.path.exists(local_file_path):
+                os.remove(local_file_path)
+        except Exception:
+            pass
+        
+        # Clean up storage file on error
+        try:
+            with create_app_context():
+                from flask import current_app
+                current_app.supabase.storage.from_("audio_bucket").remove([filename])
+        except Exception:
+            pass
+        
+        return {'ok': False, 'error': error_msg}
