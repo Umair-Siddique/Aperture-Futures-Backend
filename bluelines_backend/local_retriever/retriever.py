@@ -7,12 +7,12 @@ from langchain_openai import OpenAI
 from openai import OpenAI as OpenAIClient 
 import anthropic
 from langchain_pinecone import PineconeVectorStore
-from langchain.chains.query_constructor.base import AttributeInfo
+from langchain.chains.query_constructor.schema import AttributeInfo
 from langchain.retrievers.self_query.base import SelfQueryRetriever
 from langchain_community.query_constructors.pinecone import PineconeTranslator
-from langchain.schema.runnable import RunnableLambda, RunnableBranch, RunnablePassthrough
+from langchain_core.runnables import RunnableLambda, RunnableBranch, RunnablePassthrough
 from langchain.memory import ConversationBufferWindowMemory
-from langchain.schema.messages import HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage
 from config import Config
 from pinecone import Pinecone
 from typing import Optional, List, Tuple

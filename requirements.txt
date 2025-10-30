@@ -7,6 +7,7 @@ numpy
 PyMuPDF
 langchain-text-splitters
 langchain
+langchain-core
 langchain-community
 langchain_openai
 lark

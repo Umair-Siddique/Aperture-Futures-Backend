@@ -2,7 +2,7 @@ from flask import Blueprint, request, jsonify, current_app, Response, stream_wit
 import logging
 from uuid import uuid4
 from datetime import datetime
-from langchain.schema.runnable import RunnableLambda, RunnablePassthrough
+from langchain_core.runnables import RunnableLambda, RunnablePassthrough
 from config import Config
 from typing import Optional, List, Tuple, Literal
 import asyncio
