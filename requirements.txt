@@ -5,6 +5,7 @@ anthropic
 faiss-cpu
 numpy
 PyMuPDF
+langchain-text-splitters
 langchain
 langchain-community
 langchain_openai
