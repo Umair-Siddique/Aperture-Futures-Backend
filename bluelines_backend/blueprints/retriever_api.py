@@ -549,9 +549,9 @@ def query_retriever():
 
     route = classify_and_route()
     if route == "web_search":
-        status_msg = "[STATUS] Searching from ReliefWeb...\n"
+        status_msg = "[STATUS] Searching from Web...\n"
     elif route == "security_council_report_search":
-        status_msg = "[STATUS] Searching from Security Council Report Web...\n"
+        status_msg = "[STATUS] Searching from Web...\n"
     else:
         status_msg = "[STATUS] Searching from Database...\n"
 
