@@ -187,7 +187,7 @@ def store_in_pinecone_permanent(metadata, filename, openai_client, pinecone_inde
             'id': vector_id,
             'values': embedding,
             'metadata': pinecone_metadata
-        }],namespace='development')
+        }])
         
         logging.info(f"Successfully stored in Pinecone with ID: {vector_id}")
         return vector_id
