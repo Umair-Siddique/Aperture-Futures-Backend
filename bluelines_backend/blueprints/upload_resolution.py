@@ -18,6 +18,7 @@ upload_resolution_bp = Blueprint('upload_resolution', __name__)
 ALLOWED_EXTENSIONS = {'pdf'}
 EMBEDDING_MODEL = 'text-embedding-3-large'
 TEMP_NAMESPACE_PREFIX = 'temp_upload_'
+NEW_RESOLUTIONS_NAMESPACE = 'new_resolutions'
 
 def allowed_file(filename):
     """Check if file has allowed extension"""
@@ -125,29 +126,50 @@ def safe_json_extract(text):
     """Safely extract JSON from LLM response"""
     try:
         # Clean up and remove code block markers
-        clean_text = re.sub(r"```json|```", "", text)
+        clean_text = re.sub(r"```json|```|```", "", text)
         clean_text = re.sub(r"//.*", "", clean_text)
 
-        # Extract JSON block
-        match = re.search(r'\{.*\}', clean_text, re.DOTALL)
-        if not match:
+        # Find all JSON objects (in case LLM returns multiple)
+        json_objects = re.findall(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', clean_text)
+        
+        if not json_objects:
             return None
-
-        json_str = match.group()
-
-        # Normalize newlines within strings
-        json_str = re.sub(r'(?<!\\)\n', '\\n', json_str)
-
-        # Remove trailing commas
-        json_str = re.sub(r",\s*([}\]])", r"\1", json_str)
-
-        return json.loads(json_str)
+        
+        # Try each JSON object until one parses successfully
+        for json_str in json_objects:
+            try:
+                # Normalize newlines within strings
+                json_str = re.sub(r'(?<!\\)\n', '\\n', json_str)
+                
+                # Remove trailing commas
+                json_str = re.sub(r",\s*([}\]])", r"\1", json_str)
+                
+                parsed = json.loads(json_str)
+                
+                # Validate it has the expected structure
+                if isinstance(parsed, dict) and "resolution_no" in parsed:
+                    if len(json_objects) > 1:
+                        logging.warning(f"Multiple JSON objects found, using the first valid one (Resolution {parsed.get('resolution_no')})")
+                    return parsed
+            except json.JSONDecodeError:
+                continue
+        
+        # If no valid JSON found, try the old method as fallback
+        match = re.search(r'\{.*?\}', clean_text, re.DOTALL)
+        if match:
+            json_str = match.group()
+            json_str = re.sub(r'(?<!\\)\n', '\\n', json_str)
+            json_str = re.sub(r",\s*([}\]])", r"\1", json_str)
+            return json.loads(json_str)
+            
+        return None
+        
     except json.JSONDecodeError as e:
         logging.error(f"JSON decoding error: {e}")
         logging.error(f"Raw response:\n{text}")
         return None
 
-def store_in_pinecone_permanent(metadata, filename, openai_client, pinecone_index):
+def store_in_pinecone_permanent(metadata, original_filename, openai_client, pinecone_index):
     """Store the processed document embedding in Pinecone permanent namespace"""
     try:
         # Generate embedding for the summary
@@ -176,20 +198,20 @@ def store_in_pinecone_permanent(metadata, filename, openai_client, pinecone_inde
             'url': metadata.get('url', '')
         }
         
-        # Create unique ID
+        # Create unique ID using original filename (without UUID prefix)
         resolution_no = metadata.get('resolution_no', 'unknown')
         year = metadata.get('year', 'unknown')
-        basename = os.path.splitext(filename)[0]
+        basename = os.path.splitext(original_filename)[0]
         vector_id = f"{basename}_{resolution_no}_{year}"
         
-        # Upsert to Pinecone (default namespace)
+        # Upsert to Pinecone in new_resolutions namespace
         pinecone_index.upsert(vectors=[{
             'id': vector_id,
             'values': embedding,
             'metadata': pinecone_metadata
-        }])
+        }], namespace=NEW_RESOLUTIONS_NAMESPACE)
         
-        logging.info(f"Successfully stored in Pinecone with ID: {vector_id}")
+        logging.info(f"Successfully stored in Pinecone namespace '{NEW_RESOLUTIONS_NAMESPACE}' with ID: {vector_id}")
         return vector_id
         
     except Exception as e:
@@ -224,6 +246,15 @@ def process_pdf_with_openai(pdf_file, filename, app):
             raise ValueError("Groq client not initialized. Make sure init_groq() is called.")
         groq_client = app.groq
         pinecone_index = app.pc.Index(index_name)
+    
+    # Extract original filename from unique_filename (remove UUID prefix if present)
+    # Format: {uuid}_{original_filename} -> extract original_filename
+    original_filename = filename
+    if '_' in filename:
+        # Check if it starts with a UUID-like pattern (32 hex chars)
+        parts = filename.split('_', 1)
+        if len(parts) == 2 and len(parts[0]) == 32 and all(c in '0123456789abcdef' for c in parts[0].lower()):
+            original_filename = parts[1]
     
     # Create unique temporary namespace for this upload
     temp_namespace = f"{TEMP_NAMESPACE_PREFIX}{uuid4().hex}"
@@ -267,6 +298,11 @@ def process_pdf_with_openai(pdf_file, filename, app):
         metadata = safe_json_extract(metadata_response.choices[0].message.content)
         if metadata is None:
             raise ValueError("Failed to extract metadata from the document")
+        
+        # Clean up resolution_no: remove year in brackets if present
+        if "resolution_no" in metadata and metadata["resolution_no"]:
+            # Remove patterns like " (1947)", " (2023)", etc.
+            metadata["resolution_no"] = re.sub(r'\s*\(\d{4}\)', '', metadata["resolution_no"]).strip()
 
         # Generate summary page by page (2 pages at a time)
         pdf_file.seek(0)  # Reset file pointer
@@ -285,10 +321,10 @@ def process_pdf_with_openai(pdf_file, filename, app):
 
         # Combine summaries
         metadata["summary"] = "\n".join(summaries)
-        metadata["filename"] = filename
+        metadata["filename"] = original_filename
         
-        # Store in Pinecone permanent namespace
-        vector_id = store_in_pinecone_permanent(metadata, filename, openai_client, pinecone_index)
+        # Store in Pinecone permanent namespace using original filename
+        vector_id = store_in_pinecone_permanent(metadata, original_filename, openai_client, pinecone_index)
         metadata["vector_id"] = vector_id
         
         # Clean up temporary namespace
@@ -304,11 +340,15 @@ def process_pdf_with_openai(pdf_file, filename, app):
 
 # Metadata extraction system prompt
 METADATA_SYSTEM_PROMPT = """
-Extract comprehensive metadata from given Security Council document strictly in the following structured format for efficient embedding and integration into the RAG system. Provide only the metadata fields exactly as specified below without any additional content or explanations:
+Extract comprehensive metadata from given Security Council document strictly in the following structured format for efficient embedding and integration into the RAG system.
+
+CRITICAL INSTRUCTION: Return ONLY ONE JSON object for the PRIMARY resolution in the document. If the document contains multiple resolutions, extract metadata for the FIRST or MOST PROMINENT resolution only.
+
+Provide only the metadata fields exactly as specified below without any additional content, explanations, or multiple JSON objects:
 
 {
-  "resolution_no": "",  // Use case: Identify and retrieve specific resolutions by their unique identifier.
-  "year": "",  // Use case: Retrieve documents based on the year they were passed.
+  "resolution_no": "",  // Use case: Identify and retrieve specific resolutions by their unique identifier. IMPORTANT: Extract ONLY the resolution number (e.g., "20", "1234", "2758") WITHOUT the year in brackets. Do NOT include "(YYYY)" format.
+  "year": "",  // Use case: Retrieve documents based on the year they were passed. Should be a number (e.g., 1947, 2023).
   "theme": [""],  // . Use case: Group and retrieve resolutions based on specific thematic areas (eg., Humanitarian, Peacekeeping, Sanctions, Terrorism, WPS/CAAC, Climate, Tech, Political etc).
   "chapter": "",  // Options: "Chapter VI" (peaceful actions; phrases: "Urges", "Recommends") OR "Chapter VII" (binding enforcement; phrases: "Decides", "Demands", "Authorizes use of force"). Use case: Identify enforceability and action type.
   "charter_articles": [""] // Extract and list all UN Charter articles explicitly mentioned or referenced in the resolution (e.g., Article 24, Article 25, Article 27).,
