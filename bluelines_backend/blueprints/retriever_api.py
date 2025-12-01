@@ -11,6 +11,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pinecone import Pinecone
 from langgraph.graph import StateGraph, END
 from typing_extensions import TypedDict
+import json
+import re
 
 retriever_bp = Blueprint('bluelines_retriever', __name__)
 executor = ThreadPoolExecutor()
@@ -161,7 +163,14 @@ def search_security_council_report(query: str, app) -> str:
             logging.error(f"Security Council Report search error: {e}")
             return f"Error performing Security Council Report search: {str(e)}"
 
-def retrieve_documents(query: str, app, top_k: int = 5, namespace: Optional[str] = None, index_name: str = "unsc-index"):
+def retrieve_documents(
+    query: str,
+    app,
+    top_k: int = 5,
+    namespace: Optional[str] = None,
+    index_name: str = "unsc-index",
+    metadata_filter: Optional[dict] = None
+):
     with app.app_context():
         index = app.pc.Index(name=index_name)
         dense_vector = app.embeddings.embed_query(query)
@@ -173,6 +182,8 @@ def retrieve_documents(query: str, app, top_k: int = 5, namespace: Optional[str]
         }
         if namespace:
             query_kwargs["namespace"] = namespace
+        if metadata_filter:
+            query_kwargs["filter"] = metadata_filter
         response = index.query(**query_kwargs)
         return [(match["id"], match.get("metadata", {})) for match in response.get("matches", [])]
 
@@ -211,8 +222,10 @@ def resolution_search_node(state: GraphState) -> GraphState:
     app = state["app"]
     query = state["query"]
     
+    metadata_filter = generate_metadata_filter(query, app)
+    
     # Retrieve documents from Pinecone
-    dense_results = retrieve_documents(query, app)
+    dense_results = retrieve_documents(query, app, metadata_filter=metadata_filter)
     structured_results = conditional_retrieval(query, app)
     
     structured_resolution_numbers = {doc.metadata.get('resolution_no') for doc in structured_results}
@@ -375,6 +388,106 @@ def conditional_retrieval(query: str, app):
         # For now, return empty list since we don't have the complex retriever set up
         # This can be enhanced later when the full dependencies are available
         return []
+
+
+def generate_metadata_filter(query: str, app) -> Optional[dict]:
+    """
+    Uses the LLM to map a user query to Pinecone metadata filters so we can
+    combine dense similarity with structured constraints.
+    """
+    with app.app_context():
+        prompt = f"""
+You are mapping Security Council user queries onto metadata filters for Pinecone.
+Metadata fields available (see ingestion in upload_resolution pipeline):
+- resolution_no (string, exact match)
+- year (string or integer)
+- theme (list[string])
+- chapter (string)
+- charter_articles (list[string])
+- entities (list[string])
+- reporting_cycle (string)
+- operative_authority (string)
+
+For the user query below, infer ONLY what is explicit or strongly implied.
+Return STRICT JSON with this schema:
+{{
+  "resolution_no": null|string,
+  "year": null|string|int,
+  "theme": [],
+  "chapter": null|string,
+  "charter_articles": [],
+  "entities": [],
+  "reporting_cycle": null|string,
+  "operative_authority": null|string
+}}
+
+Use null for unknown scalar fields and [] for unknown list fields.
+Do not add commentary.
+
+QUERY:
+"{query}"
+"""
+        try:
+            response = app.llm.invoke(prompt)
+        except Exception:
+            logging.exception("Failed to generate metadata filter")
+            return None
+
+        metadata = _safe_parse_json(response)
+        if not isinstance(metadata, dict):
+            return None
+
+        filter_payload = _build_pinecone_filter(metadata)
+        return filter_payload or None
+
+
+def _safe_parse_json(raw_text: str) -> Optional[dict]:
+    """Attempt to parse JSON even if wrapped in extra text/code fences."""
+    try:
+        return json.loads(raw_text)
+    except json.JSONDecodeError:
+        pass
+
+    try:
+        json_str = re.search(r"\{.*\}", raw_text, re.DOTALL)
+        if json_str:
+            return json.loads(json_str.group())
+    except Exception:
+        logging.exception("Unable to parse metadata filter JSON")
+    return None
+
+
+def _build_pinecone_filter(metadata: dict) -> dict:
+    """Translate metadata values into Pinecone filter operators."""
+    filter_payload = {}
+
+    eq_fields = [
+        "resolution_no",
+        "year",
+        "chapter",
+        "reporting_cycle",
+        "operative_authority"
+    ]
+    list_fields = ["theme", "charter_articles", "entities"]
+
+    for field in eq_fields:
+        value = metadata.get(field)
+        if value is None:
+            continue
+        if isinstance(value, str):
+            value = value.strip()
+        if value != "" and value is not None:
+            filter_payload[field] = {"$eq": value}
+
+    for field in list_fields:
+        values = metadata.get(field) or []
+        if isinstance(values, str):
+            values = [values]
+        cleaned = [str(v).strip() for v in values if str(v).strip()]
+        if cleaned:
+            filter_payload[field] = {"$in": cleaned}
+
+    return filter_payload
 
 
 # LCEL Runnable chain
@@ -558,15 +671,13 @@ def query_retriever():
     async def retrieve_and_build():
         return await parallel_retrieve(query, app)
 
-    context = asyncio.run(retrieve_and_build())
-
-    final_prompt = build_final_prompt_with_history(query, context, history)
-
     def generate_and_store():
         with app.app_context():
             chunks = []
             # Yield status first
             yield status_msg
+            context = asyncio.run(retrieve_and_build())
+            final_prompt = build_final_prompt_with_history(query, context, history)
             # Then yield LLM streamed output as before
             for chunk in generate_llm_response(final_prompt, SYSTEM_PROMPT, app, model_id=model_id):
                 if chunk:
