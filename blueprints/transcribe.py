@@ -57,6 +57,21 @@ CHUNK_SIZE = 8192  # 8KB chunks for streaming
 CHUNK_DURATION_SECONDS = 60   # 1 minute chunks
 MAX_CONCURRENT_CHUNKS = 10     # threads
 
+# Allowed meeting types (frontend will send one of these)
+ALLOWED_MEETING_TYPES = {
+    "UNSC": "UNSC",
+    "GENERAL ASSEMBLY": "General Assembly",
+    "HUMAN RIGHTS COUNCIL": "Human Rights Council",
+}
+
+def _normalize_meeting_type(raw: str | None) -> str | None:
+    if raw is None:
+        return None
+    cleaned = raw.strip()
+    if not cleaned:
+        return None
+    return ALLOWED_MEETING_TYPES.get(cleaned.upper())
+
 def check_memory_usage():
     """Check current memory usage and trigger cleanup if needed."""
     memory_percent = psutil.virtual_memory().percent
@@ -85,9 +100,13 @@ def transcribe_and_store(user):
     title = request.form.get("title")
     description = request.form.get("description")
     members_raw = request.form.get("members")
+    meeting_type = _normalize_meeting_type(request.form.get("meeting_type"))
 
-    if not title or not description or not members_raw:
-        return jsonify({"error": "title, description, and members are required"}), 400
+    if not title or not description or not members_raw or not meeting_type:
+        return jsonify({
+            "error": "title, description, members, and meeting_type are required",
+            "allowed_meeting_types": list(ALLOWED_MEETING_TYPES.values())
+        }), 400
 
     members_list = [m.strip() for m in members_raw.split(",") if m.strip()]
     if not members_list:
@@ -161,7 +180,7 @@ def transcribe_and_store(user):
                 return jsonify({"error": "Failed to get file URL"}), 500
         
         # enqueue Celery task with storage URL instead of local file path
-        task = transcribe_audio_task.delay(title, description, members_list, storage_url, filename)
+        task = transcribe_audio_task.delay(title, description, members_list, storage_url, filename, meeting_type)
 
         return jsonify({"task_id": task.id}), 202, {"Location": f"/tasks/{task.id}"}
         
@@ -528,9 +547,13 @@ def transcribe_video_and_store(user):
     description = request.form.get("description")
     video_url = request.form.get("url") or request.form.get("video_url")
     members_raw = request.form.get("members")
+    meeting_type = _normalize_meeting_type(request.form.get("meeting_type"))
 
-    if not title or not description or not video_url or not members_raw:
-        return jsonify({"error": "title, description, url, and members are required"}), 400
+    if not title or not description or not video_url or not members_raw or not meeting_type:
+        return jsonify({
+            "error": "title, description, url, members, and meeting_type are required",
+            "allowed_meeting_types": list(ALLOWED_MEETING_TYPES.values())
+        }), 400
 
     members_list = [m.strip() for m in members_raw.split(",") if m.strip()]
     if not members_list:
@@ -547,7 +570,7 @@ def transcribe_video_and_store(user):
 
     try:
         # Enqueue Celery task for background processing
-        task = transcribe_video_task.delay(title, description, members_list, video_url)
+        task = transcribe_video_task.delay(title, description, members_list, video_url, meeting_type)
         
         current_app.logger.info(f"Video transcription task enqueued for: {title}, task_id: {task.id}")
         

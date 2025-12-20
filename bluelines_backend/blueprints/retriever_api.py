@@ -3,12 +3,12 @@ import logging
 from uuid import uuid4
 from datetime import datetime
 from langchain_core.runnables import RunnableLambda, RunnablePassthrough
-from config import Config
+
 from typing import Optional, List, Tuple, Literal
 import asyncio
-from langchain_openai import OpenAIEmbeddings
+
 from concurrent.futures import ThreadPoolExecutor
-from pinecone import Pinecone
+
 from langgraph.graph import StateGraph, END
 from typing_extensions import TypedDict
 import json

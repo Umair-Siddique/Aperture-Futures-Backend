@@ -56,7 +56,7 @@ def get_celery_app():
 celery_app = get_celery_app()
 
 @celery_app.task(bind=True, name="transcribe.audio")
-def transcribe_audio_task(self, title, description, members_list, storage_url, filename):
+def transcribe_audio_task(self, title, description, members_list, storage_url, filename, meeting_type=None):
     """
     Background task to transcribe uploaded audio with progress reporting.
     """
@@ -134,6 +134,7 @@ def transcribe_audio_task(self, title, description, members_list, storage_url, f
                     "title": title,
                     "description": description,
                     "members": members_list,
+                    "meeting_type": meeting_type,
                     "timestamp": int(time.time()),
                 }).execute()
                 supabase_stored = True
@@ -287,7 +288,7 @@ def transcribe_audio_task(self, title, description, members_list, storage_url, f
 
 
 @celery_app.task(bind=True, name="transcribe.video")
-def transcribe_video_task(self, title, description, members_list, video_url):
+def transcribe_video_task(self, title, description, members_list, video_url, meeting_type=None):
     """
     Background task to download audio from video and transcribe with progress reporting.
     """
@@ -373,6 +374,7 @@ def transcribe_video_task(self, title, description, members_list, video_url):
                     "title": title,
                     "description": description,
                     "members": members_list,
+                    "meeting_type": meeting_type,
                     "timestamp": int(time.time()),
                 }).execute()
                 supabase_stored = True
