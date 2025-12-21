@@ -447,7 +447,7 @@ def list_audio_files(user):
     Response:
       {
         "items": [
-          {"title": "...", "description": "...", "timestamp": 1234567890}, ...
+          {"title": "...", "description": "...", "meeting_type": "...", "timestamp": 1234567890}, ...
         ],
         "page": 1,
         "limit": 10,
@@ -472,7 +472,7 @@ def list_audio_files(user):
         resp = (
             current_app.supabase
                 .table("audio_files")
-                .select("title, description, timestamp", count="exact")  #  include description
+                .select("title, description, meeting_type, timestamp", count="exact")
                 .order("timestamp", desc=True)
                 .order("title", desc=True)  # tie-breaker for stable ordering
                 .range(start, end)
