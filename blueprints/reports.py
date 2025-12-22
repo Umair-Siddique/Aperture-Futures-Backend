@@ -1,4 +1,4 @@
-from flask import Blueprint, request, jsonify, current_app, send_file
+from flask import Blueprint, request, jsonify, current_app, send_file, Response
 import tempfile
 import os
 
@@ -38,3 +38,32 @@ def download_report():
         download_name=f"{title}_report.txt",
         mimetype="text/plain"
     )
+
+
+@report_bp.route("/transcription-text", methods=["GET"])
+def get_transcription_text():
+    """
+    Returns the full transcription text (Whisper output) as plain text.
+    Query params:
+      - title: meeting/audio_files title
+    """
+    title = request.args.get("title")
+    if not title:
+        return jsonify({"error": "Title is required"}), 400
+
+    rec = (
+        current_app.supabase.table("audio_files")
+        .select("transcription_text")
+        .eq("title", title)
+        .limit(1)
+        .execute()
+    )
+
+    if not rec.data:
+        return jsonify({"error": f"No record found for title '{title}'"}), 404
+
+    transcription_text = rec.data[0].get("transcription_text")
+    if not transcription_text:
+        return jsonify({"error": "No transcription_text stored for this title"}), 404
+
+    return Response(transcription_text, mimetype="text/plain; charset=utf-8")
