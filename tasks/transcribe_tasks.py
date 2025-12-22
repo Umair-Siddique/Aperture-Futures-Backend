@@ -134,6 +134,7 @@ def transcribe_audio_task(self, title, description, members_list, storage_url, f
                     "title": title,
                     "description": description,
                     "members": members_list,
+                    "transcription_text": transcript,
                     "meeting_type": meeting_type,
                     "timestamp": int(time.time()),
                 }).execute()
@@ -374,6 +375,7 @@ def transcribe_video_task(self, title, description, members_list, video_url, mee
                     "title": title,
                     "description": description,
                     "members": members_list,
+                    "transcription_text": transcript,
                     "meeting_type": meeting_type,
                     "timestamp": int(time.time()),
                 }).execute()
