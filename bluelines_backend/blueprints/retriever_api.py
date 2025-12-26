@@ -13,6 +13,7 @@ from langgraph.graph import StateGraph, END
 from typing_extensions import TypedDict
 import json
 import re
+from blueprints.system_prompt import get_system_prompt, PROMPT_KEY_BLUELINES_RETRIEVER
 
 retriever_bp = Blueprint('bluelines_retriever', __name__)
 executor = ThreadPoolExecutor()
@@ -546,7 +547,7 @@ def store_message(conversation_id, sender, content, app):
         }).execute()
 
 
-SYSTEM_PROMPT = """
+DEFAULT_BLUELINES_SYSTEM_PROMPT = """
 IDENTITY / PERSONA 
 
 • You are **BlueLines LLM**, a seasoned Security‑Council drafting officer.   
@@ -678,8 +679,9 @@ def query_retriever():
             yield status_msg
             context = asyncio.run(retrieve_and_build())
             final_prompt = build_final_prompt_with_history(query, context, history)
+            system_prompt = get_system_prompt(PROMPT_KEY_BLUELINES_RETRIEVER, DEFAULT_BLUELINES_SYSTEM_PROMPT)
             # Then yield LLM streamed output as before
-            for chunk in generate_llm_response(final_prompt, SYSTEM_PROMPT, app, model_id=model_id):
+            for chunk in generate_llm_response(final_prompt, system_prompt, app, model_id=model_id):
                 if chunk:
                     chunks.append(chunk)
                     yield chunk  # Stream each piece

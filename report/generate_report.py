@@ -4,11 +4,12 @@ from flask import current_app
 from config import Config
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 import time
+from blueprints.system_prompt import get_system_prompt, PROMPT_KEY_REPORT_GENERATION
 
 
 def _build_system_prompt() -> str:
     """Return the instructions for formatting and structuring the report."""
-    return dedent("""
+    default_prompt = dedent("""
 HUMANITARIAN
 You are a UN policy and humanitarian analyst. Convert the raw UN Security Council transcript into a concise diplomatic report written for UN Missions, UN agencies, and humanitarian organisations.
 Ensure all summaries reflect humanitarian substance (health, protection of civilians, humanitarian access, displacement, starvation/IHL violations, and operational constraints).
@@ -52,6 +53,8 @@ Implications for humanitarian operations or political trajectory
 Output
 Produce one English report only.
     """).strip()
+
+    return get_system_prompt(PROMPT_KEY_REPORT_GENERATION, default_prompt)
 
 
 def _chunk_transcript(transcript: str, chunk_size: int = 20000) -> List[str]:

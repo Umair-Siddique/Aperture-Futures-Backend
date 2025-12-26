@@ -8,6 +8,7 @@ from blueprints.conversations import conversations_bp
 from blueprints.forgot_password import forgot_password_bp
 from blueprints.retriever import retriever_bp
 from blueprints.reports import report_bp
+from blueprints.system_prompt import system_prompt_bp
 
 # Import BlueLines blueprints
 from bluelines_backend.blueprints.chat import chat_bp as bluelines_chat_bp
@@ -51,6 +52,7 @@ def create_app():
     app.register_blueprint(forgot_password_bp, url_prefix="/forgot_password")
     app.register_blueprint(retriever_bp, url_prefix="/retriever")
     app.register_blueprint(report_bp, url_prefix="/report")
+    app.register_blueprint(system_prompt_bp, url_prefix="/system-prompt")
 
 
     # Register BlueLines blueprints
