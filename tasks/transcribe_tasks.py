@@ -122,6 +122,20 @@ def transcribe_audio_task(self, title, description, members_list, storage_url, f
         
         print(f"Transcription completed successfully, length: {len(transcript)}")
         
+        # Format transcript using GPT-4 mini before storing
+        formatted_transcript = transcript
+        try:
+            print("Formatting transcript text...")
+            with create_app_context():
+                from flask import current_app
+                from report.generate_report import format_transcript_text
+                formatted_transcript = format_transcript_text(transcript)
+                print(f"Transcript formatting completed")
+        except Exception as e:
+            print(f"Transcript formatting failed, using original: {e}")
+            # Continue with original transcript if formatting fails
+            formatted_transcript = transcript
+        
         # Store transcription in Supabase FIRST (before report generation)
         supabase_stored = False
         try:
@@ -134,7 +148,7 @@ def transcribe_audio_task(self, title, description, members_list, storage_url, f
                     "title": title,
                     "description": description,
                     "members": members_list,
-                    "transcription_text": transcript,
+                    "transcription_text": formatted_transcript,
                     "meeting_type": meeting_type,
                     "timestamp": int(time.time()),
                 }).execute()
@@ -363,6 +377,20 @@ def transcribe_video_task(self, title, description, members_list, video_url, mee
         
         print(f"Transcription completed successfully, length: {len(transcript)}")
         
+        # Format transcript using GPT-4 mini before storing
+        formatted_transcript = transcript
+        try:
+            print("Formatting transcript text...")
+            with create_app_context():
+                from flask import current_app
+                from report.generate_report import format_transcript_text
+                formatted_transcript = format_transcript_text(transcript)
+                print(f"Transcript formatting completed")
+        except Exception as e:
+            print(f"Transcript formatting failed, using original: {e}")
+            # Continue with original transcript if formatting fails
+            formatted_transcript = transcript
+        
         # Store transcription in Supabase FIRST (before report generation)
         supabase_stored = False
         try:
@@ -375,7 +403,7 @@ def transcribe_video_task(self, title, description, members_list, video_url, mee
                     "title": title,
                     "description": description,
                     "members": members_list,
-                    "transcription_text": transcript,
+                    "transcription_text": formatted_transcript,
                     "meeting_type": meeting_type,
                     "timestamp": int(time.time()),
                 }).execute()

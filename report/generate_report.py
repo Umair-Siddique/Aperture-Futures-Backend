@@ -7,6 +7,82 @@ import time
 from blueprints.system_prompt import get_system_prompt, PROMPT_KEY_REPORT_GENERATION
 
 
+def format_transcript_text(transcript: str) -> str:
+    """
+    Formats a raw transcript into properly structured markdown using GPT-4 mini.
+    Only formats the text - does not add, remove, or modify content.
+    """
+    if not transcript or not transcript.strip():
+        return transcript
+    
+    # Check if OpenAI client is properly initialized
+    if not hasattr(current_app, 'openai_client') or current_app.openai_client is None:
+        current_app.logger.warning("OpenAI client not initialized. Returning unformatted transcript.")
+        return transcript
+    
+    system_prompt = """You are a text formatter. Your ONLY job is to format the raw transcript text into clean, readable markdown.
+
+CRITICAL RULES:
+- Use ONLY the original text provided - do NOT add, remove, or modify any content
+- Do NOT add any explanatory text, headers, or summaries
+- Do NOT invent speaker names or labels unless they are clearly in the original text
+- Format with proper paragraph breaks, punctuation, and capitalization
+- Use markdown formatting (bold, italics) only if it improves readability
+- Preserve all original content exactly as provided
+
+Your output should be the same content, just better formatted."""
+
+    try:
+        # For large transcripts, chunk them
+        if len(transcript) > 15000:  # Smaller chunk size for formatting
+            current_app.logger.info(f"Formatting large transcript ({len(transcript)} chars), using chunking")
+            chunks = _chunk_transcript(transcript, chunk_size=15000)
+            formatted_chunks = []
+            
+            for i, chunk in enumerate(chunks):
+                current_app.logger.info(f"Formatting transcript chunk {i+1}/{len(chunks)}")
+                
+                user_prompt = f"""Format this portion of the transcript into clean markdown. Use only the original text - do not add or modify content.
+
+{chunk}"""
+                
+                completion = current_app.openai_client.chat.completions.create(
+                    model="gpt-5-mini-2025-08-07",
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ]
+                )
+                formatted_chunks.append(completion.choices[0].message.content)
+                time.sleep(0.3)  # Small delay to avoid rate limiting
+            
+            # Combine chunks with simple separator
+            formatted_transcript = "\n\n".join(formatted_chunks)
+        else:
+            # Process small transcript directly
+            user_prompt = f"""Format this transcript into clean markdown. Use only the original text - do not add or modify content.
+
+{transcript}"""
+            
+            completion = current_app.openai_client.chat.completions.create(
+                model="gpt-5-mini-2025-08-07",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+
+            )
+            formatted_transcript = completion.choices[0].message.content
+        
+        current_app.logger.info(f"Transcript formatting completed. Original: {len(transcript)} chars, Formatted: {len(formatted_transcript)} chars")
+        return formatted_transcript
+        
+    except Exception as e:
+        current_app.logger.error(f"Transcript formatting failed: {str(e)}. Returning original transcript.")
+        # Return original transcript if formatting fails
+        return transcript
+
+
 def _build_system_prompt() -> str:
     """Return the instructions for formatting and structuring the report."""
     default_prompt = dedent("""
