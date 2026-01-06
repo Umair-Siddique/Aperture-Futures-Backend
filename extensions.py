@@ -90,3 +90,12 @@ def init_pinecone(app):
         raise ValueError("PINECONE_API_KEY not found in environment variables. Please check your .env file.")
     pc = Pinecone(api_key=Config.PINECONE_API_KEY)
     app.pinecone_index = pc.Index(name=Config.MEETING_TRANSCRIPTS_INDEX, host=Config.PINECONE_HOST)
+
+def init_stripe(app):
+    """Initialize Stripe with API key from config"""
+    import stripe
+    if not Config.STRIPE_SECRET_KEY:
+        raise ValueError("STRIPE_SECRET_KEY not found in environment variables. Please check your .env file.")
+    stripe.api_key = Config.STRIPE_SECRET_KEY
+    app.stripe = stripe
+    print("✓ Stripe client initialized successfully")

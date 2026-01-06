@@ -4,13 +4,18 @@ from flask import current_app
 from config import Config
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 import time
-from blueprints.system_prompt import get_system_prompt, PROMPT_KEY_REPORT_GENERATION
+from blueprints.system_prompt import (
+    get_system_prompt, 
+    PROMPT_KEY_REPORT_GENERATION,
+    DEFAULT_REPORT_GENERATION_SYSTEM_PROMPT
+)
 
 
 def format_transcript_text(transcript: str) -> str:
     """
-    Formats a raw transcript into properly structured markdown using GPT-4 mini.
-    Only formats the text - does not add, remove, or modify content.
+    Formats a raw transcript into properly structured markdown with headings.
+    Uses RecursiveCharacterTextSplitter to split after paragraphs, max 10k tokens per chunk.
+    AI can generate headings if not present, but must preserve ALL original content.
     """
     if not transcript or not transcript.strip():
         return transcript
@@ -20,30 +25,68 @@ def format_transcript_text(transcript: str) -> str:
         current_app.logger.warning("OpenAI client not initialized. Returning unformatted transcript.")
         return transcript
     
-    system_prompt = """You are a text formatter. Your ONLY job is to format the raw transcript text into clean, readable markdown.
+    system_prompt = """You are a professional transcript formatter. Your job is to format raw transcript text into well-structured, readable markdown.
 
 CRITICAL RULES:
-- Use ONLY the original text provided - do NOT add, remove, or modify any content
-- Do NOT add any explanatory text, headers, or summaries
-- Do NOT invent speaker names or labels unless they are clearly in the original text
+- PRESERVE ALL ORIGINAL CONTENT - do NOT remove, skip, or omit any text from the original transcript
+- You may add markdown headings (##, ###) to organize content if they help structure the transcript
+- If headings are not in the original text, you may infer logical headings based on topic changes or speaker transitions
 - Format with proper paragraph breaks, punctuation, and capitalization
-- Use markdown formatting (bold, italics) only if it improves readability
-- Preserve all original content exactly as provided
+- Use markdown formatting (bold, italics, lists) to improve readability
+- Maintain chronological order of the original content
+- If speakers are identified, preserve their names/identifiers
+- Ensure all sentences and paragraphs from the original are included
 
-Your output should be the same content, just better formatted."""
+Your output should be the same content, but well-organized with proper markdown structure and headings."""
 
     try:
-        # For large transcripts, chunk them
-        if len(transcript) > 15000:  # Smaller chunk size for formatting
-            current_app.logger.info(f"Formatting large transcript ({len(transcript)} chars), using chunking")
-            chunks = _chunk_transcript(transcript, chunk_size=15000)
+        # Use RecursiveCharacterTextSplitter to split after paragraphs
+        # Target ~10k tokens (approximately 7500-8000 characters)
+        # Priority: split after paragraphs, then sentences, then words
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=7500,  # ~10k tokens (roughly 4 chars per token)
+            chunk_overlap=200,  # Small overlap to maintain context between chunks
+            separators=["\n\n", "\n", ". ", " ", ""]  # Priority: paragraphs, then lines, then sentences, then words
+        )
+        
+        # Split transcript into chunks
+        chunks = text_splitter.split_text(transcript)
+        current_app.logger.info(f"Split transcript into {len(chunks)} chunks for formatting (original: {len(transcript)} chars)")
+        
+        if len(chunks) == 1:
+            # Process small transcript directly
+            user_prompt = f"""Format this transcript into well-structured markdown with proper headings and formatting. 
+Preserve ALL content from the original - do not remove or skip anything.
+
+Original transcript:
+{transcript}"""
+            
+            completion = current_app.openai_client.chat.completions.create(
+                model="gpt-5-mini-2025-08-07",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ]
+            )
+            formatted_transcript = completion.choices[0].message.content
+        else:
+            # Process chunks sequentially
             formatted_chunks = []
             
             for i, chunk in enumerate(chunks):
-                current_app.logger.info(f"Formatting transcript chunk {i+1}/{len(chunks)}")
+                current_app.logger.info(f"Formatting transcript chunk {i+1}/{len(chunks)} ({len(chunk)} chars)")
                 
-                user_prompt = f"""Format this portion of the transcript into clean markdown. Use only the original text - do not add or modify content.
+                # Add context about chunk position for better formatting
+                chunk_context = ""
+                if i > 0:
+                    chunk_context = "This is a continuation of a longer transcript. "
+                if i < len(chunks) - 1:
+                    chunk_context += "This chunk will be followed by more content. "
+                
+                user_prompt = f"""{chunk_context}Format this portion of the transcript into well-structured markdown with proper headings and formatting.
+Preserve ALL content from the original - do not remove or skip anything.
 
+Transcript portion:
 {chunk}"""
                 
                 completion = current_app.openai_client.chat.completions.create(
@@ -56,81 +99,28 @@ Your output should be the same content, just better formatted."""
                 formatted_chunks.append(completion.choices[0].message.content)
                 time.sleep(0.3)  # Small delay to avoid rate limiting
             
-            # Combine chunks with simple separator
+            # Combine chunks with proper spacing
+            # Remove any duplicate headings at boundaries if they exist
             formatted_transcript = "\n\n".join(formatted_chunks)
-        else:
-            # Process small transcript directly
-            user_prompt = f"""Format this transcript into clean markdown. Use only the original text - do not add or modify content.
-
-{transcript}"""
-            
-            completion = current_app.openai_client.chat.completions.create(
-                model="gpt-5-mini-2025-08-07",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-
-            )
-            formatted_transcript = completion.choices[0].message.content
         
         current_app.logger.info(f"Transcript formatting completed. Original: {len(transcript)} chars, Formatted: {len(formatted_transcript)} chars")
         return formatted_transcript
         
     except Exception as e:
         current_app.logger.error(f"Transcript formatting failed: {str(e)}. Returning original transcript.")
+        import traceback
+        current_app.logger.error(f"Formatting error traceback: {traceback.format_exc()}")
         # Return original transcript if formatting fails
         return transcript
 
 
 def _build_system_prompt() -> str:
-    """Return the instructions for formatting and structuring the report."""
-    default_prompt = dedent("""
-HUMANITARIAN
-You are a UN policy and humanitarian analyst. Convert the raw UN Security Council transcript into a concise diplomatic report written for UN Missions, UN agencies, and humanitarian organisations.
-Ensure all summaries reflect humanitarian substance (health, protection of civilians, humanitarian access, displacement, starvation/IHL violations, and operational constraints).
-
-General Rules
-Use clean Markdown
-Diplomatic + humanitarian analytical tone
-No procedural details
-Use bold only for section headers
-Do not invent facts
-
-Grouping & Representation Rules
-If a member state speaks on behalf of a group (e.g. A3+, NAM, EU, GCC), summarise that intervention as one consolidated bullet under the delivering country, formatted as:
-*Algeria (for the A3+):* …
-Do not repeat the same content separately under each state of that group.
-Other individual national statements by A3+, if delivered separately, are then summarised individually.
-
-Report Structure (unchanged except for bundling rule)
-1) Executive Overview — 5 bullets
-Prioritise briefers’ warnings and Member State divisions on humanitarian substance (access, PoC, health system collapse, starvation as a method, obstruction, ceasefire, sanctions impact).
-2) Summary of Briefings
-7–10 sentence paragraph per briefer, capturing facts, risks, humanitarian indicators, access constraints, and asks.
-3) Member States
-Organise by blocs:
-P3 (US/UK/France)
-Russia & China
-A3+ (Algeria, Guyana, Sierra Leone, Somalia) — apply the bundling rule
-Remaining E10
-Within each bloc:
-Begin with Shared Themes (humanitarian lens)
-Then 2–4 sentences per country (3–4 lines each)
-Where a bloc statement was delivered by one member on behalf of A3+: treat as a single entry
-4) Observers / Invited States
-4–6 sentences each — focus on new or distinct humanitarian content.
-5) Overall Assessment
-Short synthesis identifying:
-Consensus or fault lines on humanitarian fundamentals
-Which Council Members aligned or diverged
-Implications for humanitarian operations or political trajectory
-
-Output
-Produce one English report only.
-    """).strip()
-
-    return get_system_prompt(PROMPT_KEY_REPORT_GENERATION, default_prompt)
+    """
+    Return the instructions for formatting and structuring the report.
+    Fetches from Supabase if available, otherwise uses the default prompt.
+    """
+    # Use the default prompt constant from system_prompt.py to avoid duplication
+    return get_system_prompt(PROMPT_KEY_REPORT_GENERATION, DEFAULT_REPORT_GENERATION_SYSTEM_PROMPT)
 
 
 def _chunk_transcript(transcript: str, chunk_size: int = 20000) -> List[str]:

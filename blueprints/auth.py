@@ -75,6 +75,49 @@ def admin_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
+def subscription_required(f):
+    """
+    A decorator to protect routes that require an active subscription.
+    """
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return jsonify({'message': 'Authorization header is missing or invalid'}), 401
+
+        token = auth_header.split(' ')[1]
+        try:
+            user_response = current_app.supabase.auth.get_user(token)
+            user = user_response.user
+            if not user:
+                return jsonify({'message': 'Token is invalid or expired'}), 401
+
+            # Check subscription status
+            profile_response = current_app.supabase.table('profiles').select('subscription_status').eq('id', user.id).single().execute()
+            
+            if profile_response.data:
+                subscription_status = profile_response.data.get('subscription_status', 'none')
+                if subscription_status not in ['active', 'trialing']:
+                    return jsonify({
+                        'message': 'Active subscription required',
+                        'subscription_required': True,
+                        'status': subscription_status
+                    }), 403
+            else:
+                return jsonify({
+                    'message': 'Active subscription required',
+                    'subscription_required': True,
+                    'status': 'none'
+                }), 403
+            
+            kwargs['user'] = user
+
+        except Exception as e:
+            return jsonify({'message': 'Authentication error', 'error': str(e)}), 401
+
+        return f(*args, **kwargs)
+    return decorated_function
+
 # --- User Auth API Endpoints ---
 
 @auth_bp.route('/signup', methods=['POST'])

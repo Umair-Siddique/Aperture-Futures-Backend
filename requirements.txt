@@ -30,3 +30,4 @@ celery
 redis
 tavily-python
 langgraph
+stripe

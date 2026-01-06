@@ -21,6 +21,12 @@ class Config:
     CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND')
     TAVILY_API_KEY = os.getenv('TAVILY_API_KEY')
 
+    STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
+    STRIPE_PUBLISHABLE_KEY = os.getenv("STRIPE_PUBLISHABLE_KEY")
+    STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
+    STRIPE_PRICE_ID = os.getenv("STRIPE_PRICE_ID", "price_1SmOH74wBduPT8EwOHFS0tg9")  # Default to provided price ID
+    FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+
     # SMTP / Email settings
     SMTP_HOST = os.getenv("SMTP_HOST", "smtp.protonmail.ch")
     SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
