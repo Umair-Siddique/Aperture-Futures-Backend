@@ -24,7 +24,7 @@ class Config:
     STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
     STRIPE_PUBLISHABLE_KEY = os.getenv("STRIPE_PUBLISHABLE_KEY")
     STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
-    STRIPE_PRICE_ID = os.getenv("STRIPE_PRICE_ID", "price_1SmOH74wBduPT8EwOHFS0tg9")  # Default to provided price ID
+    STRIPE_PRICE_ID = os.getenv("STRIPE_PRICE_ID")  # Default to provided price ID
     FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
 
     # SMTP / Email settings
