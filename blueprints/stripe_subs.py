@@ -14,9 +14,20 @@ def create_checkout_session(user):
     User must be authenticated
     """
     try:
+        # Try to get from app config first
         price_id = current_app.config.get('STRIPE_PRICE_ID')
+        
+        # Fallback: try to get directly from Config class
         if not price_id:
-            return jsonify({'error': 'Stripe price ID not configured'}), 500
+            from config import Config
+            price_id = Config.STRIPE_PRICE_ID
+        
+        if not price_id:
+            return jsonify({
+                'error': 'Stripe price ID not configured',
+                'message': 'STRIPE_PRICE_ID environment variable is not set. Please set it in your environment variables.',
+                'hint': 'Add STRIPE_PRICE_ID=price_YOUR_PRICE_ID to your environment variables (e.g., in Render dashboard or .env file)'
+            }), 500
         
         frontend_url = current_app.config.get('FRONTEND_URL', 'http://localhost:5173')
         
@@ -46,6 +57,19 @@ def create_checkout_session(user):
             'session_id': checkout_session.id
         }), 200
         
+    except stripe.error.InvalidRequestError as e:
+        # Check if it's a price ID error
+        error_msg = str(e)
+        if 'No such price' in error_msg:
+            traceback.print_exc()
+            return jsonify({
+                'error': 'Invalid Stripe price ID',
+                'message': 'The price ID does not exist in your current Stripe environment. Make sure you are using a test price ID when using test/sandbox keys, or a production price ID when using production keys.',
+                'hint': 'Check your STRIPE_PRICE_ID environment variable and ensure it matches your Stripe environment (test vs production)',
+                'original_error': error_msg
+            }), 400
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
     except Exception as e:
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
