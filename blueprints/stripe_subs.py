@@ -6,6 +6,48 @@ import traceback
 
 subscription_bp = Blueprint('subscription', __name__)
 
+@subscription_bp.route('/plans', methods=['GET'])
+def get_subscription_plans():
+    """
+    Get available subscription plans with pricing information
+    Public endpoint - no authentication required
+    """
+    try:
+        # Get price ID from config
+        price_id = current_app.config.get('STRIPE_PRICE_ID')
+        
+        if not price_id:
+            from config import Config
+            price_id = Config.STRIPE_PRICE_ID
+        
+        if not price_id:
+            return jsonify({'error': 'Stripe price ID not configured'}), 500
+        
+        # Retrieve price details from Stripe
+        price = stripe.Price.retrieve(price_id, expand=['product'])
+        
+        plan = {
+            'id': price.id,
+            'currency': price.currency,
+            'unit_amount': price.unit_amount,  # Amount in cents
+            'interval': price.recurring.interval if price.recurring else None,
+            'interval_count': price.recurring.interval_count if price.recurring else None,
+            'product': {
+                'id': price.product.id,
+                'name': price.product.name,
+                'description': price.product.description,
+            }
+        }
+        
+        return jsonify({'plan': plan}), 200
+        
+    except stripe.error.StripeError as e:
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
 @subscription_bp.route('/create-checkout-session', methods=['POST'])
 @token_required
 def create_checkout_session(user):
@@ -29,7 +71,17 @@ def create_checkout_session(user):
                 'hint': 'Add STRIPE_PRICE_ID=price_YOUR_PRICE_ID to your environment variables (e.g., in Render dashboard or .env file)'
             }), 500
         
-        frontend_url = current_app.config.get('FRONTEND_URL', 'http://localhost:5173')
+        # Try to get from app config first
+        frontend_url = current_app.config.get('FRONTEND_URL')
+        
+        # Fallback: try to get directly from Config class
+        if not frontend_url:
+            from config import Config
+            frontend_url = Config.FRONTEND_URL
+        
+        # Final fallback to default
+        if not frontend_url:
+            frontend_url = 'http://localhost:5173'
         
         # Create checkout session
         checkout_session = stripe.checkout.Session.create(
@@ -74,6 +126,82 @@ def create_checkout_session(user):
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
+@subscription_bp.route('/verify-checkout-session', methods=['GET'])
+@token_required
+def verify_checkout_session(user):
+    """
+    Verify a checkout session after payment
+    Used on the success page to confirm payment and get subscription details
+    """
+    try:
+        session_id = request.args.get('session_id')
+        
+        if not session_id:
+            return jsonify({'error': 'session_id parameter is required'}), 400
+        
+        # Retrieve the session from Stripe
+        session = stripe.checkout.Session.retrieve(
+            session_id,
+            expand=['subscription', 'customer']
+        )
+        
+        # Verify the session belongs to the authenticated user
+        session_user_id = session.metadata.get('user_id')
+        if session_user_id != user.id:
+            return jsonify({'error': 'Unauthorized access to this session'}), 403
+        
+        # Get subscription details if available
+        subscription_info = None
+        subscription_id = None
+        subscription_status = None
+        if session.subscription:
+            # Handle both expanded subscription object and subscription ID string
+            if isinstance(session.subscription, str):
+                # If it's just an ID, retrieve the full subscription
+                subscription = stripe.Subscription.retrieve(session.subscription)
+            else:
+                # If it's already expanded, use it directly
+                subscription = session.subscription
+            
+            # Safely get subscription fields (some may not exist immediately after checkout)
+            subscription_id = subscription.id
+            subscription_status = getattr(subscription, 'status', None)
+            subscription_info = {
+                'id': subscription.id,
+                'status': subscription_status,
+                'current_period_start': getattr(subscription, 'current_period_start', None),
+                'current_period_end': getattr(subscription, 'current_period_end', None),
+                'cancel_at_period_end': getattr(subscription, 'cancel_at_period_end', False),
+            }
+
+        # Persist subscription status so /subscription-status reflects immediately
+        if session.payment_status == 'paid' and session.customer:
+            try:
+                current_app.supabase_admin.table('profiles').upsert({
+                    'id': user.id,
+                    'stripe_customer_id': session.customer,
+                    'subscription_id': subscription_id,
+                    'subscription_status': subscription_status or 'active',
+                    'role': 'user'
+                }).execute()
+            except Exception as e:
+                print(f"Error updating profile after checkout verification for {user.id}: {e}")
+        
+        return jsonify({
+            'success': True,
+            'session_id': session.id,
+            'payment_status': session.payment_status,
+            'customer_email': session.customer_email,
+            'subscription': subscription_info
+        }), 200
+        
+    except stripe.error.StripeError as e:
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
 @subscription_bp.route('/subscription-status', methods=['GET'])
 @token_required
 def get_subscription_status(user):
@@ -82,15 +210,24 @@ def get_subscription_status(user):
     """
     try:
         # Get customer ID from Supabase profiles table
-        profile_response = current_app.supabase.table('profiles').select('stripe_customer_id, subscription_status, subscription_id').eq('id', user.id).single().execute()
-        
-        if not profile_response.data:
+        profile_response = None
+        try:
+            profile_response = current_app.supabase_admin.table('profiles').select('stripe_customer_id, subscription_status, subscription_id').eq('id', user.id).execute()
+        except Exception as e:
+            # Profile doesn't exist - return default status
+            print(f"Profile not found for user {user.id}: {e}")
             return jsonify({
                 'has_subscription': False,
                 'status': 'none'
             }), 200
         
-        profile = profile_response.data
+        if not profile_response or not profile_response.data:
+            return jsonify({
+                'has_subscription': False,
+                'status': 'none'
+            }), 200
+        # Supabase returns a list for non-single queries
+        profile = profile_response.data[0] if isinstance(profile_response.data, list) else profile_response.data
         stripe_customer_id = profile.get('stripe_customer_id')
         subscription_status = profile.get('subscription_status', 'none')
         subscription_id = profile.get('subscription_id')
@@ -107,10 +244,10 @@ def get_subscription_status(user):
             try:
                 subscription = stripe.Subscription.retrieve(subscription_id)
                 subscription_info = {
-                    'status': subscription.status,
-                    'current_period_end': subscription.current_period_end,
-                    'cancel_at_period_end': subscription.cancel_at_period_end,
-                    'current_period_start': subscription.current_period_start,
+                    'status': getattr(subscription, 'status', None),
+                    'current_period_end': getattr(subscription, 'current_period_end', None),
+                    'cancel_at_period_end': getattr(subscription, 'cancel_at_period_end', False),
+                    'current_period_start': getattr(subscription, 'current_period_start', None),
                 }
             except stripe.error.StripeError as e:
                 print(f"Error retrieving subscription from Stripe: {e}")
@@ -163,13 +300,28 @@ def stripe_webhook():
             subscription_id = session.get('subscription')
             
             if user_id and customer_id:
-                # Update user profile with subscription info
-                current_app.supabase.table('profiles').update({
-                    'stripe_customer_id': customer_id,
-                    'subscription_id': subscription_id,
-                    'subscription_status': 'active'
-                }).eq('id', user_id).execute()
-                print(f"✓ Subscription activated for user {user_id}")
+                # Upsert user profile with subscription info (creates if doesn't exist, updates if exists)
+                try:
+                    current_app.supabase_admin.table('profiles').upsert({
+                        'id': user_id,
+                        'stripe_customer_id': customer_id,
+                        'subscription_id': subscription_id,
+                        'subscription_status': 'active',
+                        'role': 'user'  # Default role if creating new profile
+                    }).execute()
+                    print(f"✓ Subscription activated for user {user_id}")
+                except Exception as e:
+                    print(f"Error updating profile for user {user_id}: {e}")
+                    # Try update as fallback
+                    try:
+                        current_app.supabase_admin.table('profiles').update({
+                            'stripe_customer_id': customer_id,
+                            'subscription_id': subscription_id,
+                            'subscription_status': 'active'
+                        }).eq('id', user_id).execute()
+                        print(f"✓ Subscription activated for user {user_id} (via update)")
+                    except Exception as update_error:
+                        print(f"Failed to update profile: {update_error}")
         
         elif event_type == 'customer.subscription.updated':
             # Subscription status changed
@@ -179,11 +331,11 @@ def stripe_webhook():
             subscription_id = subscription.get('id')
             
             # Find user by customer_id
-            profile_response = current_app.supabase.table('profiles').select('id').eq('stripe_customer_id', customer_id).single().execute()
+            profile_response = current_app.supabase_admin.table('profiles').select('id').eq('stripe_customer_id', customer_id).single().execute()
             
             if profile_response.data:
                 user_id = profile_response.data['id']
-                current_app.supabase.table('profiles').update({
+                current_app.supabase_admin.table('profiles').update({
                     'subscription_status': subscription_status,
                     'subscription_id': subscription_id
                 }).eq('id', user_id).execute()
@@ -194,11 +346,11 @@ def stripe_webhook():
             subscription = data
             customer_id = subscription.get('customer')
             
-            profile_response = current_app.supabase.table('profiles').select('id').eq('stripe_customer_id', customer_id).single().execute()
+            profile_response = current_app.supabase_admin.table('profiles').select('id').eq('stripe_customer_id', customer_id).single().execute()
             
             if profile_response.data:
                 user_id = profile_response.data['id']
-                current_app.supabase.table('profiles').update({
+                current_app.supabase_admin.table('profiles').update({
                     'subscription_status': 'cancelled',
                     'subscription_id': None
                 }).eq('id', user_id).execute()
@@ -209,11 +361,11 @@ def stripe_webhook():
             invoice = data
             customer_id = invoice.get('customer')
             
-            profile_response = current_app.supabase.table('profiles').select('id').eq('stripe_customer_id', customer_id).single().execute()
+            profile_response = current_app.supabase_admin.table('profiles').select('id').eq('stripe_customer_id', customer_id).single().execute()
             
             if profile_response.data:
                 user_id = profile_response.data['id']
-                current_app.supabase.table('profiles').update({
+                current_app.supabase_admin.table('profiles').update({
                     'subscription_status': 'past_due'
                 }).eq('id', user_id).execute()
                 print(f"✓ Payment failed for user {user_id}")
@@ -232,7 +384,7 @@ def cancel_subscription(user):
     """
     try:
         # Get subscription ID from profile
-        profile_response = current_app.supabase.table('profiles').select('subscription_id').eq('id', user.id).single().execute()
+        profile_response = current_app.supabase_admin.table('profiles').select('subscription_id').eq('id', user.id).single().execute()
         
         if not profile_response.data or not profile_response.data.get('subscription_id'):
             return jsonify({'error': 'No active subscription found'}), 400
@@ -261,7 +413,7 @@ def reactivate_subscription(user):
     Reactivate a cancelled subscription
     """
     try:
-        profile_response = current_app.supabase.table('profiles').select('subscription_id').eq('id', user.id).single().execute()
+        profile_response = current_app.supabase_admin.table('profiles').select('subscription_id').eq('id', user.id).single().execute()
         
         if not profile_response.data or not profile_response.data.get('subscription_id'):
             return jsonify({'error': 'No subscription found'}), 400
@@ -283,6 +435,48 @@ def reactivate_subscription(user):
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
+@subscription_bp.route('/invoices', methods=['GET'])
+@token_required
+def get_invoices(user):
+    """
+    Get invoice history for the authenticated user
+    """
+    try:
+        # Get customer ID from profile
+        profile_response = current_app.supabase_admin.table('profiles').select('stripe_customer_id').eq('id', user.id).single().execute()
+        
+        if not profile_response.data or not profile_response.data.get('stripe_customer_id'):
+            return jsonify({'invoices': []}), 200
+        
+        customer_id = profile_response.data['stripe_customer_id']
+        
+        # Get invoices from Stripe
+        invoices = stripe.Invoice.list(customer=customer_id, limit=10)
+        
+        invoice_list = []
+        for invoice in invoices.data:
+            invoice_list.append({
+                'id': invoice.id,
+                'amount_due': invoice.amount_due,
+                'amount_paid': invoice.amount_paid,
+                'currency': invoice.currency,
+                'status': invoice.status,
+                'created': invoice.created,
+                'period_start': invoice.period_start,
+                'period_end': invoice.period_end,
+                'invoice_pdf': invoice.invoice_pdf,
+                'hosted_invoice_url': invoice.hosted_invoice_url,
+            })
+        
+        return jsonify({'invoices': invoice_list}), 200
+        
+    except stripe.error.StripeError as e:
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
 @subscription_bp.route('/customer-portal', methods=['POST'])
 @token_required
 def create_customer_portal_session(user):
@@ -291,13 +485,24 @@ def create_customer_portal_session(user):
     """
     try:
         # Get customer ID from profile
-        profile_response = current_app.supabase.table('profiles').select('stripe_customer_id').eq('id', user.id).single().execute()
+        profile_response = current_app.supabase_admin.table('profiles').select('stripe_customer_id').eq('id', user.id).single().execute()
         
         if not profile_response.data or not profile_response.data.get('stripe_customer_id'):
             return jsonify({'error': 'No Stripe customer found'}), 400
         
         customer_id = profile_response.data['stripe_customer_id']
-        frontend_url = current_app.config.get('FRONTEND_URL', 'http://localhost:5173')
+        
+        # Try to get from app config first
+        frontend_url = current_app.config.get('FRONTEND_URL')
+        
+        # Fallback: try to get directly from Config class
+        if not frontend_url:
+            from config import Config
+            frontend_url = Config.FRONTEND_URL
+        
+        # Final fallback to default
+        if not frontend_url:
+            frontend_url = 'http://localhost:5173'
         
         # Create portal session
         portal_session = stripe.billing_portal.Session.create(
