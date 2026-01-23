@@ -6,8 +6,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 import time
 from blueprints.system_prompt import (
     get_system_prompt, 
-    PROMPT_KEY_REPORT_GENERATION,
-    DEFAULT_REPORT_GENERATION_SYSTEM_PROMPT
+    PROMPT_KEY_REPORT_GENERATION
 )
 
 
@@ -283,10 +282,9 @@ Transcript portion:
 def _build_system_prompt() -> str:
     """
     Return the instructions for formatting and structuring the report.
-    Fetches from Supabase if available, otherwise uses the default prompt.
+    Fetches from Supabase. Raises error if not configured.
     """
-    # Use the default prompt constant from system_prompt.py to avoid duplication
-    return get_system_prompt(PROMPT_KEY_REPORT_GENERATION, DEFAULT_REPORT_GENERATION_SYSTEM_PROMPT)
+    return get_system_prompt(PROMPT_KEY_REPORT_GENERATION)
 
 
 def _chunk_transcript(transcript: str, chunk_size: int = 20000) -> List[str]:
