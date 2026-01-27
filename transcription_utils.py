@@ -118,7 +118,10 @@ def split_audio_into_chunks_ffmpeg(audio_path, output_dir="chunks", chunk_length
         logger.error(f"FFmpeg chunking failed: {e}")
         return []
 
-    return [os.path.join(output_dir, f) for f in os.listdir(output_dir) if f.endswith(".wav")]
+    # Sort chunks to ensure proper sequence (os.listdir doesn't guarantee order)
+    chunk_files = [f for f in os.listdir(output_dir) if f.endswith(".wav")]
+    chunk_files.sort()  # Sort alphabetically - works because chunks are zero-padded (chunk_000, chunk_001, etc.)
+    return [os.path.join(output_dir, f) for f in chunk_files]
 
 def transcribe_large_audio_optimized(audio_path: str):
     """Optimized large audio transcription with sequential processing and memory management."""
