@@ -122,23 +122,22 @@ def transcribe_audio_task(self, title, description, members_list, storage_url, f
         
         print(f"Transcription completed successfully, length: {len(transcript)}")
         
-        # COMMENTED OUT: Format transcript using GPT-4 mini before storing
-        # This code has been disabled to save raw transcription as-is
-        # formatted_transcript = transcript
-        # try:
-        #     print("Formatting transcript text...")
-        #     with create_app_context():
-        #         from flask import current_app
-        #         from report.generate_report import format_transcript_text
-        #         formatted_transcript = format_transcript_text(transcript)
-        #         print(f"Transcript formatting completed")
-        # except Exception as e:
-        #     print(f"Transcript formatting failed, using original: {e}")
-        #     # Continue with original transcript if formatting fails
-        #     formatted_transcript = transcript
+        # Format transcript using GPT-4 before storing
+        formatted_transcript = transcript
+        try:
+            print("Formatting transcript text...")
+            with create_app_context():
+                from flask import current_app
+                from report.generate_report import format_transcript_text
+                formatted_transcript = format_transcript_text(transcript)
+                print(f"Transcript formatting completed")
+        except Exception as e:
+            print(f"Transcript formatting failed, using original: {e}")
+            # Continue with original transcript if formatting fails
+            formatted_transcript = transcript
         
         # Store transcription in Supabase FIRST (before report generation)
-        # Storing RAW transcript without formatting
+        # Storing FORMATTED transcript
         supabase_stored = False
         try:
             print("Starting Supabase storage...")
@@ -150,7 +149,7 @@ def transcribe_audio_task(self, title, description, members_list, storage_url, f
                     "title": title,
                     "description": description,
                     "members": members_list,
-                    "transcription_text": transcript,  # Using RAW transcript
+                    "transcription_text": formatted_transcript,  # Using FORMATTED transcript
                     "meeting_type": meeting_type,
                     "timestamp": int(time.time()),
                 }).execute()
@@ -173,7 +172,7 @@ def transcribe_audio_task(self, title, description, members_list, storage_url, f
             print("Starting report generation...")
             with create_app_context():
                 from report.generate_report import generate_and_store_transcription_report
-                report_info = generate_and_store_transcription_report(title=title, transcript=transcript)
+                report_info = generate_and_store_transcription_report(title=title, transcript=formatted_transcript)
                 report_saved = bool(report_info.get("ok"))
                 print(f"Report generation result: {report_saved}")
         except Exception as e:
@@ -193,7 +192,7 @@ def transcribe_audio_task(self, title, description, members_list, storage_url, f
             print("Starting embedding processing...")
             with create_app_context():
                 from flask import current_app
-                chunks = preprocess_and_chunk(transcript)
+                chunks = preprocess_and_chunk(formatted_transcript)
                 safe_namespace = sanitize_id(title)
                 print(f"Created {len(chunks)} chunks for namespace: {safe_namespace}")
                 
@@ -244,6 +243,8 @@ def transcribe_audio_task(self, title, description, members_list, storage_url, f
         
         # Cleanup
         del transcript
+        if 'formatted_transcript' in locals():
+            del formatted_transcript
         if 'chunks' in locals():
             del chunks
         gc.collect()
@@ -379,23 +380,22 @@ def transcribe_video_task(self, title, description, members_list, video_url, mee
         
         print(f"Transcription completed successfully, length: {len(transcript)}")
         
-        # COMMENTED OUT: Format transcript using GPT-4 mini before storing
-        # This code has been disabled to save raw transcription as-is
-        # formatted_transcript = transcript
-        # try:
-        #     print("Formatting transcript text...")
-        #     with create_app_context():
-        #         from flask import current_app
-        #         from report.generate_report import format_transcript_text
-        #         formatted_transcript = format_transcript_text(transcript)
-        #         print(f"Transcript formatting completed")
-        # except Exception as e:
-        #     print(f"Transcript formatting failed, using original: {e}")
-        #     # Continue with original transcript if formatting fails
-        #     formatted_transcript = transcript
+        # Format transcript using GPT-4 before storing
+        formatted_transcript = transcript
+        try:
+            print("Formatting transcript text...")
+            with create_app_context():
+                from flask import current_app
+                from report.generate_report import format_transcript_text
+                formatted_transcript = format_transcript_text(transcript)
+                print(f"Transcript formatting completed")
+        except Exception as e:
+            print(f"Transcript formatting failed, using original: {e}")
+            # Continue with original transcript if formatting fails
+            formatted_transcript = transcript
         
         # Store transcription in Supabase FIRST (before report generation)
-        # Storing RAW transcript without formatting
+        # Storing FORMATTED transcript
         supabase_stored = False
         try:
             print("Starting Supabase storage...")
@@ -407,7 +407,7 @@ def transcribe_video_task(self, title, description, members_list, video_url, mee
                     "title": title,
                     "description": description,
                     "members": members_list,
-                    "transcription_text": transcript,  # Using RAW transcript
+                    "transcription_text": formatted_transcript,  # Using FORMATTED transcript
                     "meeting_type": meeting_type,
                     "timestamp": int(time.time()),
                 }).execute()
@@ -448,7 +448,7 @@ def transcribe_video_task(self, title, description, members_list, video_url, mee
                         
                         if existing_record.data:
                             print("Record confirmed, proceeding with report generation...")
-                            report_info = generate_and_store_transcription_report(title=title, transcript=transcript)
+                            report_info = generate_and_store_transcription_report(title=title, transcript=formatted_transcript)
                             report_saved = bool(report_info.get("ok"))
                             print(f"Report generation result: {report_saved}")
                             print(f"Report info: {report_info}")
@@ -458,7 +458,7 @@ def transcribe_video_task(self, title, description, members_list, video_url, mee
                     except Exception as verify_error:
                         print(f"Error verifying record existence: {verify_error}")
                         # Still try to generate report
-                        report_info = generate_and_store_transcription_report(title=title, transcript=transcript)
+                        report_info = generate_and_store_transcription_report(title=title, transcript=formatted_transcript)
                         report_saved = bool(report_info.get("ok"))
                         print(f"Report generation result (after verification error): {report_saved}")
                         
@@ -480,7 +480,7 @@ def transcribe_video_task(self, title, description, members_list, video_url, mee
             print("Starting embedding processing...")
             with create_app_context():
                 from flask import current_app
-                chunks = preprocess_and_chunk(transcript)
+                chunks = preprocess_and_chunk(formatted_transcript)
                 safe_namespace = sanitize_id(title)
                 print(f"Created {len(chunks)} chunks for namespace: {safe_namespace}")
                 
@@ -531,6 +531,8 @@ def transcribe_video_task(self, title, description, members_list, video_url, mee
         
         # Cleanup
         del transcript
+        if 'formatted_transcript' in locals():
+            del formatted_transcript
         if 'chunks' in locals():
             del chunks
         gc.collect()
